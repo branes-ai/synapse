@@ -1,5 +1,19 @@
 name: release-please
 
+# Fully automatic releases: every releasable merge to main is versioned,
+# tagged, and published by this one run, with no manual merge of the release PR.
+#
+#   1. release-please opens or updates the release PR (CHANGELOG + manifest).
+#   2. This job squash-merges it.
+#   3. release-please runs again, sees the merged release PR, and creates the
+#      tag and GitHub Release.
+#
+# Step 3 runs in the same job because a merge made with the built-in
+# GITHUB_TOKEN does not trigger workflows: the push from step 2 will not
+# start another run of this workflow, so nothing else would tag the release.
+# For the same reason the release commit (generated CHANGELOG and manifest
+# only) gets no CI run of its own on main.
+
 on:
   push:
     branches: [main]
@@ -8,13 +22,35 @@ permissions:
   contents: write
   pull-requests: write
 
+# Serialize releases: two quick merges must not race on the release PR.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
 jobs:
   release-please:
     name: release-please
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+      - name: Open or update the release PR
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      - name: Merge the release PR
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+        run: gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --delete-branch
+
+      - name: Tag and publish the release
+        if: ${{ steps.release.outputs.prs_created == 'true' }}
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7  # v5.0.0
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          skip-github-pull-request: true
