@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/branes-ai/synapse/compare/v0.3.1...v0.4.0) (2026-10-21)
+
+
+### Features
+
+* **graph:** graph builder, liveness-based arena planner, and allocation-free session ([#11](https://github.com/branes-ai/synapse/issues/11)) ([1870015](https://github.com/branes-ai/synapse/commit/1870015fad45c89012b2b8677a093ef9f2e6a197))
+
 ## [0.3.1](https://github.com/branes-ai/synapse/compare/v0.3.0...v0.3.1) (2026-10-21)
 
 
