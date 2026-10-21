@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/branes-ai/synapse/compare/v0.5.0...v0.6.0) (2026-10-21)
+
+
+### Features
+
+* **kernels:** batched prefill with a gemm bit-identical to gemv ([#16](https://github.com/branes-ai/synapse/issues/16)) ([b75eeb4](https://github.com/branes-ai/synapse/commit/b75eeb426d5895f038c3529b1e712c4ea39dfccc))
+
 ## [0.5.0](https://github.com/branes-ai/synapse/compare/v0.4.0...v0.5.0) (2026-10-21)
 
 
