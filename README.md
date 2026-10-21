@@ -43,7 +43,7 @@ The platform repos are organized after the nervous system:
 |---|---|---|
 | [`cortex`](https://github.com/branes-ai/cortex) | Cerebral cortex | Perception (VIO, SLAM, SfM), vision-language-action models, world building, path planning |
 | **`synapse`** (this repo) | The synapses: where signals are transmitted and computed | Tensor storage, graph construction, memory planning, and execution of ML models |
-| [`reflex`](https://github.com/branes-ai/reflex) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, IMU state propagation, MPC, fault recovery |
+| [`reflex`](https://github.com/branes-ai/reflex) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, IMU state propagation of the `cortex` estimate, MPC, fault recovery |
 
 `cortex` decides *what* to compute (a VLA policy, a depth network, a learned motion model). `synapse` turns that model into a static, allocation-free compute graph and runs it. `reflex` consumes the results inside its bounded control loops and must never wait on anything that can allocate or stall, which is why synapse's execution path is designed to be deterministic as well.
 
