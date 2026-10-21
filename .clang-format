@@ -1,0 +1,71 @@
+---
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++20
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+NamespaceIndentation: None
+ContinuationIndentWidth: 4
+
+# Line length
+ColumnLimit: 120
+
+# Braces
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+
+# Templates
+AlwaysBreakTemplateDeclarations: Yes
+SpaceAfterTemplateKeyword: true
+
+# Pointers and references
+PointerAlignment: Left
+ReferenceAlignment: Left
+DerivePointerAlignment: false
+
+# Includes
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # Project headers (highest priority — closest to the source file)
+  - Regex:    '^"branes/'
+    Priority: 1
+  - Regex:    '^<branes/'
+    Priority: 1
+  # Other project-local quoted includes
+  - Regex:    '^"'
+    Priority: 2
+  # Third-party headers in angle brackets with a slash (cxx, gtest, mtl, etc.)
+  - Regex:    '^<[^/]+/'
+    Priority: 3
+  # System headers ending in .h (C compatibility headers)
+  - Regex:    '^<[^/]+\.h>'
+    Priority: 5
+  # C++ standard library
+  - Regex:    '^<[^/]+>'
+    Priority: 4
+
+# Spacing
+SpacesBeforeTrailingComments: 2
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+
+# Comments
+ReflowComments: true
+FixNamespaceComments: true
+
+# Misc
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+BinPackArguments: false
+BinPackParameters: false
+Cpp11BracedListStyle: true
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
