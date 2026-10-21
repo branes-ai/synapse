@@ -48,6 +48,7 @@
 #include <branes/synapse/gguf/metadata.hpp>
 #include <branes/synapse/gguf/tensor_type.hpp>
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cassert>
@@ -295,7 +296,7 @@ public:
         }
 
         // ── metadata ────────────────────────────────────────────────
-        file.metadata_.reserve(static_cast<std::size_t>(kv_count));
+        file.metadata_.reserve(capped_reserve(kv_count));
         std::unordered_set<std::string_view> keys;
         for (std::uint64_t k = 0; k < kv_count; ++k) {
             const std::size_t start = in.pos();
@@ -322,9 +323,9 @@ public:
         }
 
         // ── tensor table ────────────────────────────────────────────
-        file.tensors_.reserve(static_cast<std::size_t>(tensor_count));
+        file.tensors_.reserve(capped_reserve(tensor_count));
         std::vector<std::size_t> record_starts;
-        record_starts.reserve(static_cast<std::size_t>(tensor_count));
+        record_starts.reserve(capped_reserve(tensor_count));
         std::unordered_set<std::string_view> names;
         for (std::uint64_t i = 0; i < tensor_count; ++i) {
             const std::size_t start = in.pos();
@@ -360,6 +361,17 @@ public:
     }
 
 private:
+    /// Capacity to reserve for `count` records. Counts are already checked
+    /// against the bytes remaining, but an in-memory record is several times
+    /// larger than its smallest encoding, so reserving the full count for a
+    /// hostile multi-gigabyte image could still throw bad_alloc. Reserve at
+    /// most a typical model's worth and let push_back grow with the records
+    /// actually parsed.
+    static std::size_t capped_reserve(std::uint64_t count) noexcept {
+        constexpr std::uint64_t max_reserve = 4096;
+        return static_cast<std::size_t>(std::min(count, max_reserve));
+    }
+
     static error_info fail(errc code, std::uint64_t offset) noexcept {
         return error_info{code, offset, 0};
     }
@@ -426,7 +438,7 @@ private:
                     return fail(errc::truncated, start);
                 }
                 std::vector<std::string_view> strings;
-                strings.reserve(static_cast<std::size_t>(count));
+                strings.reserve(capped_reserve(count));
                 for (std::uint64_t i = 0; i < count; ++i) {
                     std::string_view s;
                     if (!in.read_string(s)) {

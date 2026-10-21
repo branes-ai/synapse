@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -41,10 +42,17 @@ private:
     std::filesystem::path path_;
 };
 
+// resize + memcpy rather than vector::insert: GCC 12/13 at -O2 reports a false
+// -Wstringop-overflow on small inserted ranges.
+void append(std::vector<char>& out, const void* p, std::size_t n) {
+    const std::size_t old = out.size();
+    out.resize(old + n);
+    std::memcpy(out.data() + old, p, n);
+}
+
 template <typename T>
 void put(std::vector<char>& out, T v) {
-    const auto* p = reinterpret_cast<const char*>(&v);
-    out.insert(out.end(), p, p + sizeof(T));
+    append(out, &v, sizeof(T));
 }
 
 // A GGUF v3 file with one key, general.name = "mapped", and no tensors.
@@ -57,10 +65,10 @@ std::vector<char> tiny_gguf() {
     const std::string key = "general.name";
     const std::string value = "mapped";
     put<std::uint64_t>(out, key.size());
-    out.insert(out.end(), key.begin(), key.end());
+    append(out, key.data(), key.size());
     put<std::uint32_t>(out, 8);  // string
     put<std::uint64_t>(out, value.size());
-    out.insert(out.end(), value.begin(), value.end());
+    append(out, value.data(), value.size());
     return out;
 }
 

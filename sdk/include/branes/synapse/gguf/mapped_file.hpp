@@ -99,7 +99,7 @@ public:
         if (fd < 0) {
             return os_failure(errno);
         }
-        struct stat st{};
+        struct stat st = {};
         if (::fstat(fd, &st) != 0) {
             const int err = errno;
             ::close(fd);

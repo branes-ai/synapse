@@ -26,14 +26,12 @@ class writer {
 public:
     template <typename T>
     writer& put(T v) {
-        const auto* p = reinterpret_cast<const std::byte*>(&v);
-        bytes_.insert(bytes_.end(), p, p + sizeof(T));
+        append(&v, sizeof(T));
         return *this;
     }
     writer& put_string(std::string_view s) {
         put<std::uint64_t>(s.size());
-        const auto* p = reinterpret_cast<const std::byte*>(s.data());
-        bytes_.insert(bytes_.end(), p, p + s.size());
+        append(s.data(), s.size());
         return *this;
     }
     writer& pad_to(std::size_t alignment) {
@@ -47,6 +45,16 @@ public:
     }
 
 private:
+    // resize + memcpy rather than vector::insert: GCC 12/13 at -O2 reports a
+    // false -Wstringop-overflow on small inserted ranges.
+    void append(const void* p, std::size_t n) {
+        const std::size_t old = bytes_.size();
+        bytes_.resize(old + n);
+        if (n != 0) {
+            std::memcpy(bytes_.data() + old, p, n);
+        }
+    }
+
     std::vector<std::byte> bytes_;
 };
 

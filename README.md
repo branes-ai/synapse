@@ -196,8 +196,11 @@ Early stage. Build, dependency management, and CI are in place, mirroring `corte
 
 using namespace branes::synapse::gguf;
 
-auto file  = mapped_file::open("llama-3.2-1b-instruct.Q4_K_M.gguf");  // result<mapped_file>
-auto model = parse(file->bytes());                                    // result<gguf_file>
+auto file = mapped_file::open("llama-3.2-1b-instruct.Q4_K_M.gguf");  // result<mapped_file>
+if (!file) {
+    // file.error().code == errc::io_error, file.error().os_code: errno / GetLastError()
+}
+auto model = parse(file->bytes());                                   // result<gguf_file>
 if (!model) {
     // to_string(model.error().code), model.error().offset: what failed, and where
 }
