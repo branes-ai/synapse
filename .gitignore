@@ -66,3 +66,7 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Claude Code session state — ignore everything except the shared team config.
+.claude/*
+!.claude/settings.json
