@@ -277,6 +277,14 @@ inline result<llama_config, model_error> read_llama_config(const gguf::gguf_file
     if (f.find("llama.rope.scale_linear") != nullptr) {
         return fail(model_errc::unsupported, "llama.rope.scale_linear");
     }
+    // llama.cpp scales positions by 1 / factor (linear scaling when the type
+    // key is absent); 0 means unset and 1 is the identity, so only those load.
+    if (const gguf::metadata_value* v = f.find("llama.rope.scaling.factor")) {
+        const auto* factor = std::get_if<float>(v);
+        if (factor == nullptr || (*factor != 0.0f && *factor != 1.0f)) {
+            return fail(model_errc::unsupported, "llama.rope.scaling.factor");
+        }
+    }
     if (f.find("llama.attention.scale") != nullptr) {
         return fail(model_errc::unsupported, "llama.attention.scale");
     }

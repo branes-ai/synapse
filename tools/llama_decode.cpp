@@ -16,10 +16,13 @@
 #include <branes/synapse/models/llama.hpp>
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -93,6 +96,21 @@ private:
     std::vector<char> byte_of_ = std::vector<char>(512, '?');
 };
 
+// A decimal integer in [0, max], or nothing: no sign, no trailing characters,
+// no overflow.
+std::optional<std::uint64_t> parse_uint(const char* s, std::uint64_t max) {
+    if (*s < '0' || *s > '9') {
+        return std::nullopt;
+    }
+    errno = 0;
+    char* end = nullptr;
+    const unsigned long long v = std::strtoull(s, &end, 10);
+    if (errno == ERANGE || *end != '\0' || v > max) {
+        return std::nullopt;
+    }
+    return v;
+}
+
 int usage(const char* argv0) {
     std::fprintf(stderr, "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [<token id>...]\n", argv0);
     return 2;
@@ -110,14 +128,18 @@ int main(int argc, char** argv) {
     for (int i = 2; i < argc; ++i) {
         const std::string_view a = argv[i];
         if ((a == "-n" || a == "-c") && i + 1 < argc) {
-            (a == "-n" ? n_new : n_ctx) = std::strtoull(argv[++i], nullptr, 10);
-        } else {
-            char* end = nullptr;
-            const unsigned long long t = std::strtoull(argv[i], &end, 10);
-            if (end == argv[i] || *end != '\0') {
+            // Positions are 32-bit, so neither count can usefully exceed that.
+            const auto v = parse_uint(argv[++i], std::numeric_limits<std::uint32_t>::max());
+            if (!v) {
                 return usage(argv[0]);
             }
-            prompt.push_back(static_cast<std::uint32_t>(t));
+            (a == "-n" ? n_new : n_ctx) = static_cast<std::size_t>(*v);
+        } else {
+            const auto t = parse_uint(argv[i], std::numeric_limits<std::uint32_t>::max());
+            if (!t) {
+                return usage(argv[0]);
+            }
+            prompt.push_back(static_cast<std::uint32_t>(*t));
         }
     }
 

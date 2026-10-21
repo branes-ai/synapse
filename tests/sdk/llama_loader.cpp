@@ -289,6 +289,17 @@ TEST_CASE("llama_loader: rejects features it does not implement", "[llama][loade
         require_error(spec, model_errc::unsupported, "llama.rope.scaling.type");
     }
     {
+        model_spec spec;  // linear RoPE scaling, as llama.cpp applies it without a type key
+        spec.keys["llama.rope.scaling.factor"] = kv("llama.rope.scaling.factor", value_type::float32, 2.0f);
+        require_error(spec, model_errc::unsupported, "llama.rope.scaling.factor");
+    }
+    {
+        model_spec spec;  // the identity scale is accepted
+        spec.keys["llama.rope.scaling.factor"] = kv("llama.rope.scaling.factor", value_type::float32, 1.0f);
+        loaded keep;
+        CHECK(load(spec, keep));
+    }
+    {
         model_spec spec;
         spec.keys["llama.expert_count"] = kv("llama.expert_count", value_type::uint32, std::uint32_t{8});
         require_error(spec, model_errc::unsupported, "llama.expert_count");

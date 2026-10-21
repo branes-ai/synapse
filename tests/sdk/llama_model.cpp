@@ -19,14 +19,37 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
+#include <optional>
+#include <string>
+
+namespace {
+
+// The environment variable `name`, if set. (MSVC deprecates std::getenv.)
+std::optional<std::string> env(const char* name) {
+#if defined(_MSC_VER)
+    char* value = nullptr;
+    std::size_t len = 0;
+    if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
+        return std::nullopt;
+    }
+    std::string s(value);
+    std::free(value);
+    return s;
+#else
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
+#endif
+}
+
+}  // namespace
 
 TEST_CASE("llama_model: decode logits match llama.cpp on a real model", "[llama][model]") {
-    const char* model = std::getenv("SYNAPSE_LLAMA_MODEL");
-    const char* golden = std::getenv("SYNAPSE_LLAMA_GOLDEN");
-    if (model == nullptr || golden == nullptr) {
+    const auto model = env("SYNAPSE_LLAMA_MODEL");
+    const auto golden = env("SYNAPSE_LLAMA_GOLDEN");
+    if (!model || !golden) {
         SKIP("set SYNAPSE_LLAMA_MODEL and SYNAPSE_LLAMA_GOLDEN to run");
     }
-    const auto run = synapse_test::decode_against_golden(model, golden);
+    const auto run = synapse_test::decode_against_golden(*model, *golden);
     REQUIRE(!run.positions.empty());
     std::size_t same = 0;
     for (std::size_t i = 0; i < run.positions.size(); ++i) {
