@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -62,4 +63,19 @@ TEST_CASE("llama_model: decode logits match llama.cpp on a real model", "[llama]
     }
     INFO(same << " of " << run.positions.size() << " positions agree on the top token");
     CHECK(same * 5 >= run.positions.size() * 4);
+}
+
+TEST_CASE("llama_model: prefilling the prompt in one batch equals decoding it token by token",
+          "[llama][model][prefill]") {
+    const auto model = env("SYNAPSE_LLAMA_MODEL");
+    const auto golden = env("SYNAPSE_LLAMA_GOLDEN");
+    if (!model || !golden) {
+        SKIP("set SYNAPSE_LLAMA_MODEL and SYNAPSE_LLAMA_GOLDEN to run");
+    }
+    const auto files = synapse_test::open_golden(*model, *golden);
+    const std::size_t n = files->tokens.size();
+    const auto sequential =
+        synapse_test::decode_in_chunks(*files->model, files->tokens, std::vector<std::size_t>(n, 1), 1);
+    const auto batched = synapse_test::decode_in_chunks(*files->model, files->tokens, {n}, n);
+    CHECK(synapse_test::bit_equal(batched[0], sequential[n - 1]));
 }

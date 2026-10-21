@@ -1,8 +1,9 @@
 // llama_decode — greedy decoding of a Llama-architecture GGUF model.
 //
-//   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [<token id>...]
+//   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [<token id>...]
 //
-// Feeds the prompt token ids one per step (prefill as repeated decode), then
+// Prefills the prompt token ids in runs of up to -b tokens (default 64; -b 1
+// decodes the prompt one token at a time, with the same result), then
 // generates -n more by taking the most likely next token each step. Prints
 // the tokens as text when the file carries a vocabulary, and the decode rate.
 // Without prompt tokens it starts from the model's BOS token.
@@ -23,6 +24,7 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -112,7 +114,8 @@ std::optional<std::uint64_t> parse_uint(const char* s, std::uint64_t max) {
 }
 
 int usage(const char* argv0) {
-    std::fprintf(stderr, "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [<token id>...]\n", argv0);
+    std::fprintf(
+        stderr, "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [<token id>...]\n", argv0);
     return 2;
 }
 
@@ -124,16 +127,17 @@ int main(int argc, char** argv) {
     }
     std::size_t n_new = 32;
     std::size_t n_ctx = 0;
+    std::size_t n_batch = 64;
     std::vector<std::uint32_t> prompt;
     for (int i = 2; i < argc; ++i) {
         const std::string_view a = argv[i];
-        if ((a == "-n" || a == "-c") && i + 1 < argc) {
+        if ((a == "-n" || a == "-c" || a == "-b") && i + 1 < argc) {
             // Positions are 32-bit, so neither count can usefully exceed that.
             const auto v = parse_uint(argv[++i], std::numeric_limits<std::uint32_t>::max());
             if (!v) {
                 return usage(argv[0]);
             }
-            (a == "-n" ? n_new : n_ctx) = static_cast<std::size_t>(*v);
+            (a == "-n" ? n_new : a == "-c" ? n_ctx : n_batch) = static_cast<std::size_t>(*v);
         } else {
             const auto t = parse_uint(argv[i], std::numeric_limits<std::uint32_t>::max());
             if (!t) {
@@ -168,7 +172,11 @@ int main(int argc, char** argv) {
     if (n_ctx == 0) {
         n_ctx = prompt.size() + n_new;
     }
-    auto model = models::load_llama(*parsed, n_ctx);
+    if (n_batch == 0) {
+        return usage(argv[0]);
+    }
+    n_batch = std::min(n_batch, prompt.size());
+    auto model = models::load_llama(*parsed, n_ctx, n_batch);
     if (!model) {
         const auto& e = model.error();
         std::fprintf(stderr, "cannot load the model: %s %s", std::string(to_string(e.code)).c_str(), e.name.c_str());
@@ -182,7 +190,7 @@ int main(int argc, char** argv) {
     graph::session s{model->graph};
     std::fprintf(stderr,
                  "llama: %zu layers, d=%zu, ff=%zu, %zu heads (%zu KV), vocab %zu\n"
-                 "memory: arena %.1f KiB, KV cache %.1f MiB for %zu positions\n",
+                 "memory: arena %.1f KiB for batches of %zu, KV cache %.1f MiB for %zu positions\n",
                  c.n_layer,
                  c.n_embd,
                  c.n_ff,
@@ -190,6 +198,7 @@ int main(int argc, char** argv) {
                  c.n_head_kv,
                  c.n_vocab,
                  static_cast<double>(s.memory().arena_bytes) / 1024.0,
+                 n_batch,
                  static_cast<double>(s.state_bytes()) / (1024.0 * 1024.0),
                  n_ctx);
 
@@ -197,11 +206,13 @@ int main(int argc, char** argv) {
     using clock = std::chrono::steady_clock;
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
-    const auto step = [&](std::uint32_t token) {
-        if (!s.run({token, pos++})) {
-            std::fprintf(stderr, "\ntoken %u or position %u out of range\n", token, pos - 1);
+    // Run tokens [first, first + n) of `seq` at the current position.
+    const auto run = [&](const std::uint32_t* first, std::size_t n) {
+        if (!s.run(graph::batch{std::span<const std::uint32_t>(first, n), pos})) {
+            std::fprintf(stderr, "\na token or position %u out of range\n", pos);
             std::exit(1);
         }
+        pos += static_cast<std::uint32_t>(n);
         const auto logits = s.tensor(model->logits);
         next = static_cast<std::uint32_t>(std::max_element(logits.begin(), logits.end()) - logits.begin());
     };
@@ -209,7 +220,9 @@ int main(int argc, char** argv) {
     const auto t0 = clock::now();
     for (std::uint32_t t : prompt) {
         std::printf("%s", vocab.text(t).c_str());
-        step(t);
+    }
+    for (std::size_t i = 0; i < prompt.size(); i += n_batch) {
+        run(prompt.data() + i, std::min(n_batch, prompt.size() - i));
     }
     std::fflush(stdout);
     const auto t1 = clock::now();
@@ -217,7 +230,7 @@ int main(int argc, char** argv) {
         const std::uint32_t t = next;
         std::printf("%s", vocab.text(t).c_str());
         std::fflush(stdout);
-        step(t);
+        run(&t, 1);
     }
     const auto t2 = clock::now();
     std::printf("\n");

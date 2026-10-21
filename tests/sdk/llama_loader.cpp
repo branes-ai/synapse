@@ -275,6 +275,17 @@ TEST_CASE("llama_loader: rejects missing and invalid metadata", "[llama][loader]
         model_spec spec;
         require_error(spec, model_errc::bad_value, "max_ctx", 0);
     }
+    {
+        model_spec spec;
+        loaded keep;
+        keep.bytes = spec.image();
+        auto f = gguf::parse(keep.bytes);
+        REQUIRE(f);
+        const auto m = models::load_llama(*f, 8, 0);
+        REQUIRE_FALSE(m);
+        CHECK(m.error().code == model_errc::bad_value);
+        CHECK(m.error().name == "max_batch");
+    }
 }
 
 TEST_CASE("llama_loader: rejects features it does not implement", "[llama][loader]") {
