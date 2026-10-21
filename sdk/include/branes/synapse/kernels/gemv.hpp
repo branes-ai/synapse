@@ -1,0 +1,117 @@
+#pragma once
+/// @file gemv.hpp
+/// @brief y = W x for a quantized weight matrix, with no allocation.
+///
+/// gemv quantizes x once into the scheme's activation format (Q8_0 or Q8_K
+/// blocks, or leaves it float for plain formats), then computes each output as
+/// a fused dot of one encoded weight row with those activations (see dot.hpp).
+/// The quantized activations live in caller-provided scratch memory, so a
+/// static memory planner can place them; gemv itself never allocates and
+/// never throws.
+///
+/// Accuracy: against the float reference dequantize(W) . x, the only extra
+/// error is the rounding of x to 8 bits (relative ~1/254 per element for
+/// Q8_0/Q8_K); the integer block sums are exact. Results agree with ggml's
+/// CPU kernels to float re-association error.
+
+#include <branes/synapse/kernels/dot.hpp>
+#include <branes/synapse/quant/q8.hpp>
+#include <branes/synapse/quant/scheme.hpp>
+#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <new>
+#include <span>
+#include <type_traits>
+
+namespace branes::synapse::kernels {
+
+/// Alignment gemv requires of its scratch buffer.
+inline constexpr std::size_t gemv_scratch_alignment = alignof(quant::block_q8_k);
+
+namespace detail {
+
+template <typename A>
+constexpr std::size_t activation_block_size() noexcept {
+    if constexpr (std::is_same_v<A, quant::block_q8_0>) {
+        return quant::qk_legacy;
+    } else {
+        static_assert(std::is_same_v<A, quant::block_q8_k>);
+        return quant::qk_k;
+    }
+}
+
+/// Byte offset of the widened int16 activations in the scratch buffer: after
+/// the blocks, rounded up to int16 alignment.
+template <typename A>
+constexpr std::size_t wide_offset(std::size_t cols) noexcept {
+    const std::size_t blocks = cols / activation_block_size<A>() * sizeof(A);
+    return (blocks + alignof(std::int16_t) - 1) / alignof(std::int16_t) * alignof(std::int16_t);
+}
+
+}  // namespace detail
+
+/// Scratch bytes gemv needs for a matrix of scheme S with `cols` columns:
+/// the quantized activation blocks followed by their quants widened to int16
+/// (0 for plain formats, whose activations stay float).
+///   Pre: cols % S::block_size == 0.
+template <quant::Scheme S>
+constexpr std::size_t gemv_scratch_bytes(std::size_t cols) noexcept {
+    using A = typename S::vec_dot_block;
+    if constexpr (std::is_same_v<A, float>) {
+        return 0;
+    } else {
+        return detail::wide_offset<A>(cols) + cols * sizeof(std::int16_t);
+    }
+}
+
+/// y = W x.
+///
+///   Pre:  x.size() == w.cols(), y.size() == w.rows(),
+///         scratch.size() >= gemv_scratch_bytes<S>(w.cols()), and scratch is
+///         aligned to gemv_scratch_alignment; x and y do not overlap scratch.
+///   Post: y[r] == row_dot(row r of w, activations(x)) for every r; scratch
+///         holds the quantized activation blocks (ggml's Q8_0 / Q8_K layout)
+///         followed by their int16-widened quants.
+template <quant::Scheme S>
+void gemv(const quantized_matrix_view<S>& w,
+          std::span<const float> x,
+          std::span<float> y,
+          std::span<std::byte> scratch) noexcept {
+    assert(x.size() == w.cols() && y.size() == w.rows());                                    // Pre
+    assert(scratch.size() >= gemv_scratch_bytes<S>(w.cols()));                               // Pre
+    assert(reinterpret_cast<std::uintptr_t>(scratch.data()) % gemv_scratch_alignment == 0);  // Pre
+
+    using A = typename S::vec_dot_block;
+    if constexpr (std::is_same_v<A, float>) {
+        for (std::size_t r = 0; r < w.rows(); ++r) {
+            y[r] = row_dot<S>(w.row_bytes(r).data(), activations<float>{x.data()}, w.cols());
+        }
+    } else {
+        // Create the activation blocks and the widened quants in the scratch
+        // storage, then fill them: once per gemv, shared by every row.
+        constexpr std::size_t qk = detail::activation_block_size<A>();
+        const std::size_t nb = w.cols() / qk;
+        A* blocks = ::new (static_cast<void*>(scratch.data())) A[nb];
+        if constexpr (std::is_same_v<A, quant::block_q8_0>) {
+            quant::quantize_row_q8_0(x, std::span<A>(blocks, nb));
+        } else {
+            quant::quantize_row_q8_k(x, std::span<A>(blocks, nb));
+        }
+        std::int16_t* wide =
+            ::new (static_cast<void*>(scratch.data() + detail::wide_offset<A>(w.cols()))) std::int16_t[w.cols()];
+        for (std::size_t i = 0; i < nb; ++i) {
+            for (std::size_t j = 0; j < qk; ++j) {
+                wide[i * qk + j] = blocks[i].qs[j];
+            }
+        }
+        const activations<A> act{blocks, wide};
+        for (std::size_t r = 0; r < w.rows(); ++r) {
+            y[r] = row_dot<S>(w.row_bytes(r).data(), act, w.blocks_per_row());
+        }
+    }
+}
+
+}  // namespace branes::synapse::kernels

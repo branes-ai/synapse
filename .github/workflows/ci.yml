@@ -43,7 +43,9 @@ jobs:
           echo "$files" | xargs clang-format --dry-run --Werror
 
   # Dual-compiler validation on Linux: GCC and Clang, Debug (contract asserts
-  # live) and Release (optimized, asserts compiled out).
+  # live) and Release (optimized, asserts compiled out), plus one Release build
+  # with MTL5's Highway SIMD backend at AVX2 so the vectorized kernels are
+  # tested alongside the scalar ones.
   build-and-test-linux:
     name: Build and Test (Linux - ${{ matrix.preset }})
     runs-on: ubuntu-24.04
@@ -51,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        preset: [gcc-debug, gcc-release, clang-debug, clang-release]
+        preset: [gcc-debug, gcc-release, clang-debug, clang-release, gcc-release-hwy]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:

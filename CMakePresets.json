@@ -58,6 +58,18 @@
       }
     },
     {
+      "name": "gcc-release-hwy",
+      "inherits": "linux",
+      "displayName": "GCC Release + Highway AVX2 (host)",
+      "description": "Optimized GCC build with MTL5's Highway SIMD backend, targeting x86-64-v3 (AVX2/FMA). Exercises the vectorized integer dot products in the fused kernels.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CXX_COMPILER": "g++",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3",
+        "SYNAPSE_WITH_HIGHWAY": "ON"
+      }
+    },
+    {
       "name": "windows",
       "hidden": true,
       "inherits": "base",
@@ -95,6 +107,7 @@
     { "name": "gcc-release",   "configurePreset": "gcc-release" },
     { "name": "clang-debug",   "configurePreset": "clang-debug" },
     { "name": "clang-release", "configurePreset": "clang-release" },
+    { "name": "gcc-release-hwy", "configurePreset": "gcc-release-hwy" },
     { "name": "msvc-debug",    "configurePreset": "msvc", "configuration": "Debug" },
     { "name": "msvc-release",  "configurePreset": "msvc", "configuration": "Release" },
     { "name": "msvc-ninja",    "configurePreset": "msvc-ninja" },
@@ -105,6 +118,7 @@
     { "name": "gcc-release",   "configurePreset": "gcc-release",   "output": { "outputOnFailure": true } },
     { "name": "clang-debug",   "configurePreset": "clang-debug",   "output": { "outputOnFailure": true } },
     { "name": "clang-release", "configurePreset": "clang-release", "output": { "outputOnFailure": true } },
+    { "name": "gcc-release-hwy", "configurePreset": "gcc-release-hwy", "output": { "outputOnFailure": true } },
     { "name": "msvc-debug",    "configurePreset": "msvc", "configuration": "Debug",   "output": { "outputOnFailure": true } },
     { "name": "msvc-release",  "configurePreset": "msvc", "configuration": "Release", "output": { "outputOnFailure": true } },
     { "name": "msvc-ninja",    "configurePreset": "msvc-ninja",       "output": { "outputOnFailure": true } },

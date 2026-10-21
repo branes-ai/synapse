@@ -104,6 +104,37 @@ else()
     endif()
 endif()
 
+# ── google/highway — optional SIMD backend for MTL5 ────────────────
+# The fused kernels run their integer inner loops through mtl::simd, which is
+# scalar unless MTL5's Highway backend is on. SYNAPSE_WITH_HIGHWAY fetches
+# Highway (Apache-2.0 / BSD-3-Clause) at the tag MTL5 pins and enables it on the
+# MTL5::mtl5 target. Highway dispatches statically, so it uses the ISA the
+# compiler targets: pair it with flags such as -march=x86-64-v3 (AVX2) or
+# -march=native, or it compiles for the baseline ISA (SSE2 on x86-64).
+option(SYNAPSE_WITH_HIGHWAY "Enable MTL5's Highway SIMD backend for the kernels" OFF)
+if(SYNAPSE_WITH_HIGHWAY)
+    if(NOT TARGET mtl5)
+        message(WARNING "SYNAPSE_WITH_HIGHWAY: MTL5 comes from an installed package or the parent "
+                        "project; enable Highway there (MTL5_WITH_HIGHWAY) instead.")
+    else()
+        set(HWY_ENABLE_TESTS    OFF CACHE BOOL "" FORCE)
+        set(HWY_ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+        set(HWY_ENABLE_CONTRIB  OFF CACHE BOOL "" FORCE)
+        set(HWY_ENABLE_INSTALL  OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(
+            highway
+            GIT_REPOSITORY https://github.com/google/highway.git
+            GIT_TAG        1.4.0
+            GIT_SHALLOW    TRUE
+            SYSTEM
+        )
+        FetchContent_MakeAvailable(highway)
+        target_compile_definitions(mtl5 INTERFACE MTL5_HAS_HIGHWAY)
+        target_link_libraries(mtl5 INTERFACE hwy)
+        message(STATUS "Highway: enabled for MTL5 (v1.4.0)")
+    endif()
+endif()
+
 if(SYNAPSE_BUILD_TESTS AND BUILD_TESTING AND NOT TARGET universal::universal)
     find_package(universal CONFIG QUIET)
     if(universal_FOUND)
