@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/branes-ai/synapse/compare/v0.6.0...v0.6.1) (2026-10-21)
+
+
+### Documentation
+
+* **readme:** four-tier stack diagram with cortex, synapse, and reflex as sisters ([#17](https://github.com/branes-ai/synapse/issues/17)) ([d2fc0a6](https://github.com/branes-ai/synapse/commit/d2fc0a60fdd82912b73b78caab43a8f6c082acac))
+
 ## [0.6.0](https://github.com/branes-ai/synapse/compare/v0.5.0...v0.6.0) (2026-10-21)
 
 
