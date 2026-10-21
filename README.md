@@ -124,7 +124,7 @@ auto logits = model.forward(input_tokens);
 
 1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Done: `branes/synapse/gguf/`. Validated against llama.cpp's `gguf-py` reader and writer.)*
 2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
-3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products.
+3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels. Matrix-matrix products and register-level tuning to follow.)*
 4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution.
 5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`.
 
@@ -145,6 +145,9 @@ Dependencies are pinned in [`cmake/deps.cmake`](cmake/deps.cmake) and resolved t
 | [MTL5](https://github.com/stillwater-sc/mtl5) | Math engine; part of the `branes::synapse` interface | Always |
 | [Universal](https://github.com/stillwater-sc/universal) | Number systems (posit, cfloat, fixpnt) for the type-generic tests | Tests only |
 | [Catch2](https://github.com/catchorg/Catch2) v3 | Test framework | Tests only |
+| [Highway](https://github.com/google/highway) | SIMD backend for MTL5's kernels (Apache-2.0 / BSD-3) | Opt-in: `-DSYNAPSE_WITH_HIGHWAY=ON` |
+
+Highway selects its instruction set at compile time, so pair it with ISA flags: the `gcc-release-hwy` preset uses `-march=x86-64-v3 -maes -mpclmul` (AVX2; Highway's AVX2 target also requires AES and PCLMUL, and falls back to SSSE3 without them). Without Highway the kernels use MTL5's portable scalar path.
 
 To develop against local checkouts of the Stillwater sister projects (no network):
 
@@ -181,7 +184,7 @@ synapse/
 ├── bench/        # micro-benchmarks (kernel throughput / latency)
 ├── cmake/        # dependency pins, test/warning helpers
 ├── docs/         # design notes, assessments, session records
-├── scripts/      # developer and CI helper scripts
+├── scripts/      # developer and CI helper scripts, golden-fixture generators
 ├── sdk/          # the header-only library: sdk/include/branes/synapse/
 ├── tests/        # Catch2 regression tests, one executable per file; data/ holds golden fixtures
 └── tools/        # host-side developer tools (model inspection, logit diffing)
@@ -227,7 +230,28 @@ visit_matrix(*model, *wq, [](const auto& view) {   // quantized_matrix_view<sche
 });
 ```
 
-Fused quantized kernels (roadmap step 3) are next.
+Fused kernels compute `y = W x` without expanding the weights. `x` is quantized once per call into 8-bit blocks, as llama.cpp does, and each block's dot product runs in exact integer arithmetic. The scratch memory comes from the caller, so inference never allocates:
+
+```cpp
+#include <branes/synapse/kernels/gemv.hpp>
+
+// At load time: size the scratch once, for the most demanding matrix.
+std::size_t scratch_bytes = 0;
+for (const auto& t : model->tensors()) {
+    visit_matrix(*model, t, [&](const auto& w) {
+        using S = typename std::decay_t<decltype(w)>::scheme_type;
+        scratch_bytes = std::max(scratch_bytes, kernels::gemv_scratch_bytes<S>(w.cols()));
+    });
+}
+std::vector<std::byte> scratch(scratch_bytes);
+
+// Per inference: no allocation.
+visit_matrix(*model, *wq, [&](const auto& w) {
+    kernels::gemv(w, x, y, scratch);
+});
+```
+
+`bench/gemv_bench` compares the fused kernels with dequantize-then-dot.
 
 ## License
 
