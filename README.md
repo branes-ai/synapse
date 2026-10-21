@@ -125,7 +125,7 @@ auto logits = model.forward(input_tokens);
 1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Done: `branes/synapse/gguf/`. Validated against llama.cpp's `gguf-py` reader and writer.)*
 2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
 3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels. Matrix-matrix products and register-level tuning to follow.)*
-4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution.
+4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution. *(Done for the decode path: `graph/`. Batched prefill follows with `gemm`.)*
 5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`.
 
 ## Building and testing
@@ -252,6 +252,28 @@ visit_matrix(*model, *wq, [&](const auto& w) {
 ```
 
 `bench/gemv_bench` compares the fused kernels with dequantize-then-dot.
+
+A decode step is described once as a graph, planned into a single arena, and then run with no allocation. Weights are bound into the graph as typed views, so execution never switches on a storage format:
+
+```cpp
+#include <branes/synapse/graph/session.hpp>
+
+using namespace branes::synapse::graph;
+
+graph_builder b;                                   // no-throw: errors surface at finalize()
+tensor_id x    = b.input(d);
+tensor_id h    = b.rms_norm(x, ffn_norm, eps);
+tensor_id act  = b.mul(b.silu(b.matmul(w_gate, h)), b.matmul(w_up, h));
+tensor_id out  = b.add(x, b.matmul(w_down, act));
+b.output(out);
+auto g = std::move(b).finalize();                  // result<compute_graph, graph_error>
+
+session s{*g};                                     // liveness plan + the one arena allocation
+std::ranges::copy(input, s.tensor(x).begin());
+s.run();                                           // no allocation, no throw
+```
+
+Tensors whose lifetimes don't overlap share memory. Four Llama-3.2-1B-width feed-forward blocks run in a 112 KiB arena, against 767 KiB without aliasing, and the arena stays that size however many blocks are added.
 
 ## License
 

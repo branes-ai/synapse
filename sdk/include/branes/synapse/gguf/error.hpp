@@ -8,11 +8,10 @@
 /// `error_info` describing what went wrong and where. Nothing in the loader
 /// throws, except std::bad_alloc from the standard containers it fills.
 
-#include <cassert>
+#include <branes/synapse/result.hpp>
+
 #include <cstdint>
 #include <string_view>
-#include <utility>
-#include <variant>
 
 namespace branes::synapse::gguf {
 
@@ -76,54 +75,8 @@ struct error_info {
     int os_code = 0;           ///< errno / GetLastError() for errc::io_error, else 0
 };
 
-/// Either a T or an error_info. A minimal stand-in for C++23 std::expected.
+/// A loader result: either a T or an error_info.
 template <typename T>
-class result {
-public:
-    result(T value) : v_(std::move(value)) {}
-    result(error_info err) : v_(err) {}
-
-    bool has_value() const noexcept {
-        return v_.index() == 0;
-    }
-    explicit operator bool() const noexcept {
-        return has_value();
-    }
-
-    /// Pre: has_value().
-    T& value() & {
-        assert(has_value());
-        return *std::get_if<0>(&v_);
-    }
-    const T& value() const& {
-        assert(has_value());
-        return *std::get_if<0>(&v_);
-    }
-    T&& value() && {
-        assert(has_value());
-        return std::move(*std::get_if<0>(&v_));
-    }
-    T& operator*() & {
-        return value();
-    }
-    const T& operator*() const& {
-        return value();
-    }
-    T* operator->() {
-        return &value();
-    }
-    const T* operator->() const {
-        return &value();
-    }
-
-    /// Pre: !has_value().
-    const error_info& error() const {
-        assert(!has_value());
-        return *std::get_if<1>(&v_);
-    }
-
-private:
-    std::variant<T, error_info> v_;
-};
+using result = synapse::result<T, error_info>;
 
 }  // namespace branes::synapse::gguf
