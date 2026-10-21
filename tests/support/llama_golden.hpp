@@ -15,6 +15,9 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <memory>
+#include <optional>
+#include <span>
 #include <vector>
 
 namespace synapse_test {
@@ -86,6 +89,64 @@ inline golden_run decode_against_golden(const std::filesystem::path& model_path,
         run.positions.push_back(m);
     }
     return run;
+}
+
+/// A model file and golden file opened together.
+struct golden_files {
+    branes::synapse::gguf::mapped_file model_file, golden_file;
+    std::optional<branes::synapse::gguf::gguf_file> model, golden;
+    std::vector<std::uint32_t> tokens;
+};
+
+inline std::unique_ptr<golden_files> open_golden(const std::filesystem::path& model_path,
+                                                 const std::filesystem::path& golden_path) {
+    using namespace branes::synapse;
+    auto mf = gguf::mapped_file::open(model_path);
+    REQUIRE(mf);
+    auto gf = gguf::mapped_file::open(golden_path);
+    REQUIRE(gf);
+    auto files = std::unique_ptr<golden_files>(new golden_files{std::move(*mf), std::move(*gf), {}, {}, {}});
+    auto m = gguf::parse(files->model_file.bytes());
+    REQUIRE(m);
+    files->model.emplace(std::move(*m));
+    auto g = gguf::parse(files->golden_file.bytes());
+    REQUIRE(g);
+    files->golden.emplace(std::move(*g));
+    const gguf::array_value* tokens = files->golden->get_array("synapse.golden.tokens");
+    REQUIRE(tokens != nullptr);
+    for (std::uint64_t i = 0; i < tokens->size(); ++i) {
+        files->tokens.push_back(*tokens->at<std::uint32_t>(i));
+    }
+    return files;
+}
+
+/// Decodes `tokens` in runs of the given sizes (which must sum to
+/// tokens.size()) through a graph built for max_batch tokens per run, and
+/// returns the logits after each run, i.e. for the last token of each chunk.
+inline std::vector<std::vector<float>> decode_in_chunks(const branes::synapse::gguf::gguf_file& file,
+                                                        const std::vector<std::uint32_t>& tokens,
+                                                        const std::vector<std::size_t>& chunks,
+                                                        std::size_t max_batch) {
+    using namespace branes::synapse;
+    auto model = models::load_llama(file, tokens.size(), max_batch);
+    REQUIRE(model);
+    graph::session s{model->graph};
+    std::vector<std::vector<float>> out;
+    std::size_t pos = 0;
+    for (std::size_t n : chunks) {
+        REQUIRE(pos + n <= tokens.size());
+        const std::span<const std::uint32_t> run(tokens.data() + pos, n);
+        REQUIRE(s.run(graph::batch{run, static_cast<std::uint32_t>(pos)}));
+        const auto logits = s.tensor(model->logits);
+        out.emplace_back(logits.begin(), logits.end());
+        pos += n;
+    }
+    REQUIRE(pos == tokens.size());
+    return out;
+}
+
+inline bool bit_equal(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
 }
 
 }  // namespace synapse_test

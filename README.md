@@ -124,9 +124,9 @@ auto logits = model.forward(input_tokens);
 
 1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Done: `branes/synapse/gguf/`. Validated against llama.cpp's `gguf-py` reader and writer.)*
 2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
-3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels. Matrix-matrix products and register-level tuning to follow.)*
-4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution. *(Done for the decode path: `graph/`. Batched prefill follows with `gemm`.)*
-5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`. *(Done for Llama decode: `models/llama.hpp`, RoPE and grouped-query attention over an F16 KV cache in `kernels/attention.hpp`, and `tools/llama_decode`. Logits are checked against llama.cpp on llama.cpp-generated fixtures and, opt-in, on Llama-3.2-1B Q4_K_M. Batched prefill (`gemm`) and a tokenizer follow.)*
+3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp` and `kernels/gemm.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels; each gemm row is bit-identical to gemv. Threading and register-level tiling to follow.)*
+4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution. *(Done: `graph/`, for decode and for batched prefill of up to `max_batch` tokens per run.)*
+5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`. *(Done for Llama decode: `models/llama.hpp`, RoPE and grouped-query attention over an F16 KV cache in `kernels/attention.hpp`, and `tools/llama_decode`. Logits are checked against llama.cpp on llama.cpp-generated fixtures and, opt-in, on Llama-3.2-1B Q4_K_M. Prompts prefill in batches, bit-identical to token-by-token decoding. A tokenizer follows.)*
 
 ## Building and testing
 
@@ -280,13 +280,14 @@ A whole Llama-architecture model is built from its GGUF metadata into one such g
 ```cpp
 #include <branes/synapse/models/llama.hpp>
 
-auto model = models::load_llama(file, max_ctx);    // result<llama_model, model_error>; validates every key and shape
+auto model = models::load_llama(file, max_ctx, max_batch);  // result<llama_model, model_error>; validates every key and shape
 graph::session s{model->graph};                    // arena + KV cache: the only allocations
-for (std::uint32_t pos = 0; pos < tokens.size(); ++pos) {
-    s.run({tokens[pos], pos});                     // embed, 16 x (attention + FFN), logits
-}
-std::span<float> logits = s.tensor(model->logits);
+s.run(graph::batch{prompt, 0});                    // prefill: up to max_batch tokens per run
+s.run({next_token, pos});                          // decode: one token per run
+std::span<float> logits = s.tensor(model->logits); // for the run's last token
 ```
+
+A batched run quantizes each token's activations once and unpacks every weight block once for the whole batch (`kernels::gemm`). Each gemm row performs exactly gemv's operations, so prefilling a prompt gives bit-for-bit the logits and KV cache of decoding it token by token. On Llama-3.2-1B, prefill runs 4.5x faster than token-by-token decoding (single thread).
 
 Llama-3.2-1B Q4_K_M decodes in a 515 KiB arena. Its logits agree with llama.cpp's to ~1e-7 until the first 8-bit activation rounding that falls differently, then to a few percent, the same distance synapse moves from itself under a comparable perturbation. llama.cpp's top token is synapse's top token at every position of the test prompt. On an all-F32 model, where no activation is quantized, the two agree to 2e-7 at every position. `tools/llama_decode` runs greedy generation:
 

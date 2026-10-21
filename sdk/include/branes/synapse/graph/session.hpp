@@ -11,7 +11,8 @@
 ///
 ///   session s{g};                       // plan + two allocations
 ///   copy(x, s.tensor(in));              // write the inputs
-///   s.run({token, pos});                // no allocation
+///   s.run({token, pos});                // one token; no allocation
+///   s.run(batch{tokens, pos});          // up to max_batch tokens (prefill)
 ///   read(s.tensor(out));                // read the outputs
 ///
 /// Model
@@ -31,15 +32,19 @@
 ///
 /// Inputs must be written before every run: once an input's last reader has
 /// run, the planner may reuse its memory. Outputs stay valid until the next
-/// run. A sequence is decoded by running positions 0, 1, 2, ... in order:
-/// attention at position p reads the cache rows earlier runs wrote.
+/// run. A sequence is decoded by running positions 0, 1, 2, ... in order, one
+/// token or a batch at a time: attention at position p reads the cache rows
+/// earlier runs (and earlier tokens of the same batch) wrote. A run of n
+/// tokens uses the first n rows of each batched tensor; by G1 and the order
+/// of the per-row kernels, its results equal running the tokens one by one.
 
 #include <branes/synapse/graph/graph.hpp>
 #include <branes/synapse/graph/planner.hpp>
 #include <branes/synapse/kernels/attention.hpp>
 #include <branes/synapse/kernels/elementwise.hpp>
-#include <branes/synapse/kernels/gemv.hpp>
+#include <branes/synapse/kernels/gemm.hpp>
 
+#include <algorithm>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +61,14 @@ namespace branes::synapse::graph {
 /// sequence (read by rope and attention nodes).
 struct step {
     std::uint32_t token = 0;
+    std::uint32_t pos = 0;
+};
+
+/// A run of tokens.size() consecutive tokens, the first at position pos.
+/// Graphs without embed nodes ignore the token values but still process
+/// tokens.size() rows of their inputs.
+struct batch {
+    std::span<const std::uint32_t> tokens;
     std::uint32_t pos = 0;
 };
 
@@ -76,10 +89,12 @@ public:
     session(session&&) noexcept = default;
     session& operator=(session&&) noexcept = default;
 
-    /// The float storage of tensor t.  Pre: t is a non-scratch tensor of the graph.
+    /// The float storage of tensor t: rows(t) rows of size floats; a run of
+    /// n tokens uses the first n rows of a batched tensor.
+    ///   Pre: t is a non-scratch tensor of the graph.
     std::span<float> tensor(tensor_id t) noexcept {
         assert(t < graph_->tensors().size() && graph_->tensors()[t].role != tensor_role::scratch);  // Pre
-        return {reinterpret_cast<float*>(arena_.get() + plan_.offset[t]), graph_->tensors()[t].size};
+        return {reinterpret_cast<float*>(arena_.get() + plan_.offset[t]), graph_->rows(t) * graph_->tensors()[t].size};
     }
 
     const memory_plan& memory() const noexcept {
@@ -96,17 +111,30 @@ public:
         std::memset(states_.get(), 0, state_offset_.back());
     }
 
-    /// Execute every node in order for step s.  Returns false, and runs
-    /// nothing, if s.token >= token_limit() or s.pos >= position_limit().
-    ///   Pre: the inputs have been written; positions 0..s.pos-1 of the
-    ///   current sequence have been run.
+    /// Execute every node in order for one token.  Same as run(batch) with
+    /// a single token.
     [[nodiscard]] bool run(step s = {}) noexcept {
-        if (s.token >= graph_->token_limit() || s.pos >= graph_->position_limit()) {
+        return run(batch{std::span<const std::uint32_t>(&s.token, 1), s.pos});
+    }
+
+    /// Execute every node in order for the tokens of b.  Returns false, and
+    /// runs nothing, unless 1 <= n <= max_batch(), pos + n <= position_limit()
+    /// and every token < token_limit() (n = b.tokens.size()).
+    ///   Pre: the inputs' first n rows have been written; positions
+    ///   0..b.pos-1 of the current sequence have been run.
+    [[nodiscard]] bool run(batch b) noexcept {
+        const std::size_t n = b.tokens.size();
+        if (n == 0 || n > graph_->max_batch() || std::size_t{b.pos} + n > graph_->position_limit()) {
             return false;
         }
-        step_ = s;
-        for (const node& n : graph_->nodes()) {
-            std::visit([this](const auto& op) { execute(op); }, n);
+        for (std::uint32_t t : b.tokens) {
+            if (t >= graph_->token_limit()) {
+                return false;
+            }
+        }
+        batch_ = b;
+        for (const node& nd : graph_->nodes()) {
+            std::visit([this](const auto& op) { execute(op); }, nd);
         }
         return true;
     }
@@ -150,47 +178,81 @@ private:
         return {arena_.get() + plan_.offset[t], graph_->tensors()[t].bytes};
     }
 
+    /// Rows of t this run uses: n if batched, else 1.
+    std::size_t rows(tensor_id t) const noexcept {
+        return graph_->tensors()[t].batched ? batch_.tokens.size() : 1;
+    }
+    /// The rows of t this run uses.
+    std::span<float> active(tensor_id t) noexcept {
+        return tensor(t).first(rows(t) * graph_->tensors()[t].size);
+    }
+    /// Row i of t.
+    std::span<float> row(tensor_id t, std::size_t i) noexcept {
+        const std::size_t size = graph_->tensors()[t].size;
+        return tensor(t).subspan(i * size, size);
+    }
+
     void execute(const op_matmul& o) noexcept {
-        const std::span<const float> in = tensor(o.in);
-        const std::span<float> out = tensor(o.out);
         const std::span<std::byte> scratch = bytes(o.scratch);
-        std::visit([&](const auto& w) { kernels::gemv(w, in, out, scratch); }, o.w);
+        const std::size_t n = rows(o.in);
+        std::visit([&](const auto& w) { kernels::gemm(w, active(o.in), n, active(o.out), scratch); }, o.w);
     }
     void execute(const op_add& o) noexcept {
-        kernels::add(tensor(o.a), tensor(o.b), tensor(o.out));
+        kernels::add(active(o.a), active(o.b), active(o.out));
     }
     void execute(const op_mul& o) noexcept {
-        kernels::mul(tensor(o.a), tensor(o.b), tensor(o.out));
+        kernels::mul(active(o.a), active(o.b), active(o.out));
     }
     void execute(const op_silu& o) noexcept {
-        kernels::silu(tensor(o.in), tensor(o.out));
+        kernels::silu(active(o.in), active(o.out));
     }
     void execute(const op_softmax& o) noexcept {
-        kernels::softmax(tensor(o.in), tensor(o.out));
+        for (std::size_t i = 0; i < rows(o.in); ++i) {
+            kernels::softmax(row(o.in, i), row(o.out, i));
+        }
     }
     void execute(const op_rms_norm& o) noexcept {
-        const std::span<const float> in = tensor(o.in);
-        const std::span<float> out = tensor(o.out);
-        std::visit([&](const auto& g) { kernels::rms_norm(in, g, o.eps, out); }, o.gamma);
+        for (std::size_t i = 0; i < rows(o.in); ++i) {
+            const std::span<const float> in = row(o.in, i);
+            const std::span<float> out = row(o.out, i);
+            std::visit([&](const auto& g) { kernels::rms_norm(in, g, o.eps, out); }, o.gamma);
+        }
     }
     void execute(const op_embed& o) noexcept {
-        const std::span<float> out = tensor(o.out);
-        std::visit([&](const auto& t) { t.dequantize_row(step_.token, out); }, o.table);
+        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+            const std::span<float> out = row(o.out, i);
+            std::visit([&](const auto& t) { t.dequantize_row(batch_.tokens[i], out); }, o.table);
+        }
     }
     void execute(const op_rope& o) noexcept {
-        kernels::rope(tensor(o.in), tensor(o.out), o.head_dim, step_.pos, o.theta_scale, o.freq_factors);
+        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+            kernels::rope(row(o.in, i), row(o.out, i), o.head_dim, position(i), o.theta_scale, o.freq_factors);
+        }
     }
     void execute(const op_attention& o) noexcept {
+        // Token by token: token i appends its row, then attends to positions
+        // 0..pos+i, exactly as a run of that token alone would.
         const std::span<std::byte> scratch = bytes(o.scratch);
-        kernels::attention(tensor(o.q),
-                           tensor(o.k),
-                           tensor(o.v),
-                           cache(o.cache),
-                           step_.pos,
-                           o.n_heads,
-                           o.scale,
-                           tensor(o.out),
-                           {reinterpret_cast<float*>(scratch.data()), scratch.size() / sizeof(float)});
+        const std::span<float> scores{reinterpret_cast<float*>(scratch.data()), scratch.size() / sizeof(float)};
+        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+            kernels::attention(row(o.q, i),
+                               row(o.k, i),
+                               row(o.v, i),
+                               cache(o.cache),
+                               position(i),
+                               o.n_heads,
+                               o.scale,
+                               row(o.out, i),
+                               scores);
+        }
+    }
+    void execute(const op_last_row& o) noexcept {
+        const std::span<const float> last = row(o.in, batch_.tokens.size() - 1);
+        std::copy(last.begin(), last.end(), tensor(o.out).begin());
+    }
+
+    std::uint32_t position(std::size_t i) const noexcept {
+        return batch_.pos + static_cast<std::uint32_t>(i);  // < position_limit, checked by run()
     }
 
     const compute_graph* graph_;
@@ -198,7 +260,7 @@ private:
     arena_ptr arena_;
     std::vector<std::size_t> state_offset_;
     arena_ptr states_;
-    step step_{};
+    batch batch_{};
 };
 
 }  // namespace branes::synapse::graph

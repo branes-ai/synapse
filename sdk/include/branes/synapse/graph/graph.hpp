@@ -16,9 +16,15 @@
 /// Model
 /// -----
 ///   tensor_desc
-///     bytes : size_t — storage the tensor needs in the arena
-///     size  : size_t — float elements (0 for kernel scratch)
-///     role  : input | intermediate | output | scratch
+///     bytes   : size_t — storage the tensor needs in the arena
+///     size    : size_t — float elements per row (0 for kernel scratch)
+///     batched : bool   — max_batch rows (one per token of a run) or 1 row
+///     role    : input | intermediate | output | scratch
+///
+///   A graph is built for a max_batch (1 for decode only). A run processes
+///   n <= max_batch tokens: batched tensors use their first n rows, and
+///   op_last_row reduces a batched tensor to its row n-1, so a prefill
+///   computes the final layers (e.g. the vocabulary projection) only once.
 ///
 ///   state_desc — a KV cache layer: max_ctx rows of n_kv_heads * head_dim
 ///     F16 keys and as many values
@@ -57,12 +63,18 @@
 ///                                                   — constrains nodes_, states_
 ///   I7: every state is read and written by at most one attention node
 ///                                                   — constrains nodes_, states_
+///   I8: an op's operands and result agree in batching: element-wise ops
+///       take operands that are both batched or both single-row; embed,
+///       rope and attention work on batched tensors; last_row turns a
+///       batched tensor into a single-row one
+///                                                   — constrains nodes_, tensors_
 ///
 /// The builder is no-throw on bad input: graphs are built from model
 /// metadata (untrusted), so it records the first error and finalize()
 /// returns it, with the node index where it occurred.
 
 #include <branes/synapse/kernels/attention.hpp>
+#include <branes/synapse/kernels/gemm.hpp>
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/quant/scheme.hpp>
 #include <branes/synapse/result.hpp>
@@ -123,8 +135,9 @@ enum class tensor_role : std::uint8_t { input, intermediate, output, scratch };
 
 struct tensor_desc {
     std::size_t bytes = 0;
-    std::size_t size = 0;  ///< float elements; 0 for scratch
+    std::size_t size = 0;  ///< float elements per row; 0 for scratch
     tensor_role role = tensor_role::intermediate;
+    bool batched = true;  ///< max_batch rows, or a single row
 };
 
 /// A KV cache layer, allocated by the session and kept across runs.
@@ -175,7 +188,12 @@ struct op_attention {  ///< append (k, v) to cache; out = causal attention of q 
     float scale;
 };
 
-using node = std::variant<op_matmul, op_add, op_mul, op_silu, op_softmax, op_rms_norm, op_embed, op_rope, op_attention>;
+struct op_last_row {  ///< out = row n-1 of in (the last token of the run)
+    tensor_id in, out;
+};
+
+using node = std::
+    variant<op_matmul, op_add, op_mul, op_silu, op_softmax, op_rms_norm, op_embed, op_rope, op_attention, op_last_row>;
 
 /// Operand (read) tensors of a node.
 inline std::vector<tensor_id> operands(const node& n) {
@@ -206,6 +224,9 @@ inline std::vector<tensor_id> operands(const node& n) {
         }
         std::vector<tensor_id> operator()(const op_attention& o) const {
             return {o.q, o.k, o.v};
+        }
+        std::vector<tensor_id> operator()(const op_last_row& o) const {
+            return {o.in};
         }
     };
     return std::visit(visitor{}, n);
@@ -266,7 +287,7 @@ struct graph_error {
 
 class graph_builder;
 
-/// An immutable, validated compute graph (I1-I7).
+/// An immutable, validated compute graph (I1-I8).
 class compute_graph {
 public:
     std::span<const tensor_desc> tensors() const noexcept {
@@ -294,6 +315,14 @@ public:
     std::size_t position_limit() const noexcept {
         return position_limit_;
     }
+    /// Tokens a run may process at once.
+    std::size_t max_batch() const noexcept {
+        return max_batch_;
+    }
+    /// Rows a tensor holds: max_batch() if batched, else 1.
+    std::size_t rows(tensor_id t) const noexcept {
+        return tensors_[t].batched ? max_batch_ : 1;
+    }
 
 private:
     friend class graph_builder;
@@ -303,6 +332,7 @@ private:
     std::vector<state_desc> states_;
     std::size_t token_limit_ = std::numeric_limits<std::size_t>::max();
     std::size_t position_limit_ = std::numeric_limits<std::size_t>::max();
+    std::size_t max_batch_ = 1;
     std::vector<node> nodes_;
     std::vector<tensor_id> inputs_;
     std::vector<tensor_id> outputs_;
@@ -325,7 +355,17 @@ private:
 /// finalize() reports that error.
 class graph_builder {
 public:
-    /// A graph input of `size` floats.
+    /// A builder for graphs that process up to max_batch tokens per run.
+    /// max_batch == 0 is recorded as a bad_shape error.
+    explicit graph_builder(std::size_t max_batch = 1) {
+        if (max_batch == 0) {
+            fail(graph_errc::bad_shape);
+        } else {
+            g_.max_batch_ = max_batch;
+        }
+    }
+
+    /// A graph input of `size` floats per token (batched).
     tensor_id input(std::size_t size) {
         if (failed()) {
             return invalid_tensor;
@@ -333,7 +373,7 @@ public:
         if (size == 0) {
             return fail(graph_errc::empty_tensor);
         }
-        const tensor_id t = add_floats(size, tensor_role::input);
+        const tensor_id t = add_floats(size, tensor_role::input, true);
         if (t != invalid_tensor) {
             g_.inputs_.push_back(t);
         }
@@ -348,14 +388,25 @@ public:
         if (size_of(x) != cols(w)) {
             return fail(graph_errc::size_mismatch);
         }
-        const std::size_t scratch_bytes = std::visit(
-            [](const auto& v) {
+        // gemm scratch for every row of x; n * (per-row bytes) must not wrap.
+        const std::size_t n = g_.rows(x);
+        const std::optional<std::size_t> scratch_bytes = std::visit(
+            [n](const auto& v) -> std::optional<std::size_t> {
                 using S = typename std::decay_t<decltype(v)>::scheme_type;
-                return kernels::gemv_scratch_bytes<S>(v.cols());
+                using A = typename S::vec_dot_block;
+                const std::size_t per_row =
+                    kernels::detail::gemm_row_stride<S>(v.cols()) + sizeof(kernels::activations<A>) + sizeof(float);
+                if (n > (max_graph_bytes - kernels::gemm_scratch_alignment) / per_row) {
+                    return std::nullopt;
+                }
+                return kernels::gemm_scratch_bytes<S>(v.cols(), n);
             },
             w);
-        const tensor_id out = add_floats(rows(w), tensor_role::intermediate);
-        const tensor_id scratch = add_tensor(scratch_bytes, 0, tensor_role::scratch);
+        if (!scratch_bytes) {
+            return fail(graph_errc::too_large);
+        }
+        const tensor_id out = add_floats(rows(w), tensor_role::intermediate, batched(x));
+        const tensor_id scratch = add_tensor(*scratch_bytes, 0, tensor_role::scratch, false);
         if (out == invalid_tensor || scratch == invalid_tensor) {
             return invalid_tensor;
         }
@@ -384,7 +435,7 @@ public:
         if (rows(gamma) != 1 || cols(gamma) != size_of(x)) {
             return fail(graph_errc::size_mismatch);
         }
-        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(op_rms_norm{x, gamma, eps, out});
         }
@@ -399,7 +450,7 @@ public:
         if (rows(table) == 0 || cols(table) == 0) {
             return fail(graph_errc::empty_tensor);
         }
-        const tensor_id out = add_floats(cols(table), tensor_role::intermediate);
+        const tensor_id out = add_floats(cols(table), tensor_role::intermediate, true);
         if (out != invalid_tensor) {
             g_.token_limit_ = std::min(g_.token_limit_, rows(table));
             g_.nodes_.emplace_back(op_embed{table, out});
@@ -417,14 +468,14 @@ public:
             return invalid_tensor;
         }
         if (head_dim == 0 || head_dim % 2 != 0 || size_of(x) % head_dim != 0 ||
-            (!freq_factors.empty() && freq_factors.size() != head_dim / 2)) {
-            return fail(graph_errc::bad_shape);  // I6
+            (!freq_factors.empty() && freq_factors.size() != head_dim / 2) || !batched(x)) {
+            return fail(graph_errc::bad_shape);  // I6, I8
         }
         const auto positive = [](float f) { return std::isfinite(f) && f > 0.0f; };
         if (!positive(base) || !std::all_of(freq_factors.begin(), freq_factors.end(), positive)) {
             return fail(graph_errc::bad_parameter);
         }
-        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, true);
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(op_rope{x,
                                            out,
@@ -477,8 +528,9 @@ public:
         const state_desc& c = g_.states_[cache];
         const std::size_t row = c.n_kv_heads * c.head_dim;
         if (n_heads == 0 || n_heads % c.n_kv_heads != 0 || n_heads > max_graph_bytes / c.head_dim ||
-            size_of(q) != n_heads * c.head_dim || size_of(k) != row || size_of(v) != row) {
-            return fail(graph_errc::bad_shape);  // I6
+            size_of(q) != n_heads * c.head_dim || size_of(k) != row || size_of(v) != row || !batched(q) ||
+            !batched(k) || !batched(v)) {
+            return fail(graph_errc::bad_shape);  // I6, I8
         }
         if (!std::isfinite(scale) || scale <= 0.0f) {
             return fail(graph_errc::bad_parameter);
@@ -491,14 +543,30 @@ public:
         }
         const std::size_t scratch_floats =
             kernels::attention_scratch_floats(n_heads, c.n_kv_heads, c.head_dim, c.max_ctx);
-        const tensor_id out = add_floats(size_of(q), tensor_role::intermediate);
-        const tensor_id scratch = add_tensor(scratch_floats * sizeof(float), 0, tensor_role::scratch);
+        const tensor_id out = add_floats(size_of(q), tensor_role::intermediate, true);
+        const tensor_id scratch = add_tensor(scratch_floats * sizeof(float), 0, tensor_role::scratch, false);
         if (out == invalid_tensor || scratch == invalid_tensor) {
             return invalid_tensor;
         }
         state_used_[cache] = true;
         g_.position_limit_ = std::min(g_.position_limit_, c.max_ctx);
         g_.nodes_.emplace_back(op_attention{q, k, v, out, scratch, cache, n_heads, scale});
+        return out;
+    }
+
+    /// Row n-1 of x for a run of n tokens: the last token's values.
+    ///   Pre (checked): x is batched (I8).
+    tensor_id last_row(tensor_id x) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        if (!batched(x)) {
+            return fail(graph_errc::bad_shape);  // I8
+        }
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, false);
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_last_row{x, out});
+        }
         return out;
     }
 
@@ -518,7 +586,7 @@ public:
         g_.outputs_.push_back(t);
     }
 
-    /// The graph, or the first error.  Post: on success, I1-I7 hold.
+    /// The graph, or the first error.  Post: on success, I1-I8 hold.
     result<compute_graph, graph_error> finalize() && {
         if (error_) {
             return *error_;
@@ -556,27 +624,32 @@ private:
     std::size_t size_of(tensor_id t) const noexcept {
         return g_.tensors_[t].size;
     }
+    bool batched(tensor_id t) const noexcept {
+        return g_.tensors_[t].batched;
+    }
 
-    /// Append a float tensor of `size` elements. The only place a float
-    /// tensor's byte count is computed, so the multiplication is checked once
-    /// for every op: sizes can come from untrusted metadata (an input) or from
-    /// a weight view's row count, either of which can be large enough to wrap.
-    tensor_id add_floats(std::size_t size, tensor_role role) {
-        if (size > max_graph_bytes / sizeof(float)) {
-            return fail(graph_errc::too_large);  // I5: size * sizeof(float) must not wrap
+    /// Append a float tensor of `size` elements per row, max_batch rows if
+    /// batched. The only place a float tensor's byte count is computed, so
+    /// the multiplication is checked once for every op: sizes can come from
+    /// untrusted metadata (an input) or from a weight view's row count, and
+    /// max_batch from the caller, any of which can be large enough to wrap.
+    tensor_id add_floats(std::size_t size, tensor_role role, bool is_batched) {
+        const std::size_t n = is_batched ? g_.max_batch_ : 1;
+        if (size > max_graph_bytes / sizeof(float) / n) {
+            return fail(graph_errc::too_large);  // I5: n * size * sizeof(float) must not wrap
         }
-        return add_tensor(size * sizeof(float), size, role);
+        return add_tensor(n * size * sizeof(float), size, role, is_batched);
     }
 
     /// Append a tensor of `bytes` bytes, or fail with too_large if the graph
     /// would exceed max_graph_bytes (I5).
-    tensor_id add_tensor(std::size_t bytes, std::size_t size, tensor_role role) {
+    tensor_id add_tensor(std::size_t bytes, std::size_t size, tensor_role role, bool is_batched) {
         if (bytes > max_graph_bytes - total_bytes_ ||
             (bytes + plan_alignment - 1) / plan_alignment * plan_alignment > max_graph_bytes - total_bytes_) {
             return fail(graph_errc::too_large);
         }
         total_bytes_ += (bytes + plan_alignment - 1) / plan_alignment * plan_alignment;
-        g_.tensors_.push_back(tensor_desc{bytes, size, role});
+        g_.tensors_.push_back(tensor_desc{bytes, size, role, is_batched});
         return static_cast<tensor_id>(g_.tensors_.size() - 1);
     }
 
@@ -585,10 +658,10 @@ private:
         if (!operand_ok(a) || !operand_ok(b)) {
             return invalid_tensor;
         }
-        if (size_of(a) != size_of(b)) {
-            return fail(graph_errc::size_mismatch);
+        if (size_of(a) != size_of(b) || batched(a) != batched(b)) {
+            return fail(graph_errc::size_mismatch);  // I2, I8
         }
-        const tensor_id out = add_floats(size_of(a), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(a), tensor_role::intermediate, batched(a));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(Op{a, b, out});
         }
@@ -600,7 +673,7 @@ private:
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
-        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(Op{x, out});
         }

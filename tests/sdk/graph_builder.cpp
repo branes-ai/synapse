@@ -37,11 +37,11 @@ TEST_CASE("graph_builder: builds a valid graph in topological order", "[graph]")
     CHECK(g->nodes().size() == 3);
     CHECK(g->tensors()[y].size == 512);
     CHECK(g->tensors()[z].role == tensor_role::output);
-    // The matmul's scratch tensor holds the gemv activation buffers.
+    // The matmul's scratch tensor holds the gemm activation buffers for one row.
     const auto& mm = std::get<op_matmul>(g->nodes()[1]);
     CHECK(g->tensors()[mm.scratch].role == tensor_role::scratch);
     CHECK(g->tensors()[mm.scratch].bytes ==
-          branes::synapse::kernels::gemv_scratch_bytes<branes::synapse::quant::scheme<tensor_type::q4_k>>(256));
+          branes::synapse::kernels::gemm_scratch_bytes<branes::synapse::quant::scheme<tensor_type::q4_k>>(256, 1));
 
     // I1: every operand of node i is an input or a result of an earlier node.
     for (std::size_t i = 0; i < g->nodes().size(); ++i) {
@@ -231,4 +231,54 @@ TEST_CASE("graph_builder: rejects head layouts and parameters that do not fit", 
           }) == graph_errc::bad_state);
     // embed
     CHECK(error_of([](graph_builder& b) { b.embed(matrix_ref{}); }) == graph_errc::empty_tensor);
+}
+
+TEST_CASE("graph_builder: batched graphs size tensors for max_batch rows", "[graph][batch]") {
+    std::mt19937 rng(6);
+    const random_matrix<tensor_type::q8_0> w(64, 32, rng);
+    graph_builder b(8);
+    const tensor_id x = b.input(32);
+    const tensor_id y = b.matmul(w.view(), x);
+    const tensor_id last = b.last_row(y);
+    const tensor_id z = b.silu(last);
+    b.output(z);
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+    CHECK(g->max_batch() == 8);
+    CHECK(g->rows(x) == 8);
+    CHECK(g->tensors()[x].bytes == 8 * 32 * sizeof(float));
+    CHECK(g->rows(y) == 8);
+    CHECK(g->rows(last) == 1);  // I8: last_row is single-row, and so is what follows
+    CHECK(g->rows(z) == 1);
+    const auto& mm = std::get<op_matmul>(g->nodes()[0]);
+    CHECK(g->tensors()[mm.scratch].bytes ==
+          branes::synapse::kernels::gemm_scratch_bytes<branes::synapse::quant::scheme<tensor_type::q8_0>>(32, 8));
+}
+
+TEST_CASE("graph_builder: rejects ops that mix batched and single-row tensors (I8)", "[graph][batch]") {
+    const auto error_of = [](auto build) {
+        graph_builder b(4);
+        build(b);
+        return std::move(b).finalize().error().code;
+    };
+    CHECK(error_of([](graph_builder& b) {
+              const tensor_id x = b.input(16);
+              b.add(x, b.last_row(x));
+          }) == graph_errc::size_mismatch);
+    CHECK(error_of([](graph_builder& b) { b.rope(b.last_row(b.input(16)), 8, 1e4f); }) == graph_errc::bad_shape);
+    CHECK(error_of([](graph_builder& b) { b.last_row(b.last_row(b.input(16))); }) == graph_errc::bad_shape);
+    CHECK(error_of([](graph_builder& b) {
+              const tensor_id x = b.input(16);
+              b.attention(b.last_row(x), x, x, b.kv_cache(8, 2, 8), 2, 1.0f);
+          }) == graph_errc::bad_shape);
+    {
+        graph_builder b(0);
+        CHECK(b.input(4) == invalid_tensor);
+        CHECK(std::move(b).finalize().error().code == graph_errc::bad_shape);
+    }
+    {
+        graph_builder b(std::numeric_limits<std::size_t>::max() / 8);  // max_batch * size * 4 wraps
+        CHECK(b.input(64) == invalid_tensor);
+        CHECK(std::move(b).finalize().error().code == graph_errc::too_large);
+    }
 }

@@ -11,7 +11,10 @@
 ///     x = x + Wo attention(q, k, v, kv_cache)
 ///     h = rms_norm(x, ffn_norm)
 ///     x = x + Wdown (silu(Wgate h) * Wup h)
-///   logits = Wout rms_norm(x, output_norm)      (Wout = token_embd if tied)
+///   logits = Wout rms_norm(last_row(x), output_norm)   (Wout = token_embd if tied)
+///
+/// A run processes up to max_batch tokens (prefill); only the last token's
+/// logits are computed, as llama.cpp does for a prompt.
 ///
 /// The weights stay in the mapped file: the graph holds views into it, so the
 /// gguf_file (and the image under it) must outlive the model and its sessions.
@@ -21,14 +24,15 @@
 ///   llama_config — hyperparameters read from the llama.* metadata keys
 ///   llama_model
 ///     config   : llama_config
-///     graph    : compute_graph — no inputs; one output, the logits
-///     logits   : tensor_id     — n_vocab floats
-///     max_ctx  : size_t        — positions each KV cache holds
+///     graph     : compute_graph — no inputs; one output, the logits
+///     logits    : tensor_id     — n_vocab floats, for the run's last token
+///     max_ctx   : size_t        — positions each KV cache holds
+///     max_batch : size_t        — tokens a run may process
 ///
 /// Contract
 /// --------
-///   load_llama(file, max_ctx)
-///     Pre:  none (the file is untrusted).
+///   load_llama(file, max_ctx, max_batch)
+///     Pre:  none (the file is untrusted; max_ctx, max_batch >= 1 are checked).
 ///     Post: on success, a graph satisfying I1-I7 whose every weight view has
 ///           the shape the config implies; on failure, what was wrong and,
 ///           for a key or tensor, its name. Never throws for bad input.
@@ -114,6 +118,7 @@ struct llama_model {
     graph::compute_graph graph;
     graph::tensor_id logits = graph::invalid_tensor;
     std::size_t max_ctx = 0;
+    std::size_t max_batch = 1;
 };
 
 namespace detail {
@@ -304,8 +309,10 @@ inline result<llama_config, model_error> read_llama_config(const gguf::gguf_file
 }
 
 /// The decode graph of a Llama-architecture file, with KV caches of max_ctx
-/// positions.  See the file comment for the contract.
-inline result<llama_model, model_error> load_llama(const gguf::gguf_file& f, std::size_t max_ctx) {
+/// positions, for runs of up to max_batch tokens.  See the file comment for
+/// the contract.
+inline result<llama_model, model_error>
+load_llama(const gguf::gguf_file& f, std::size_t max_ctx, std::size_t max_batch = 1) {
     using detail::fail;
     auto cfg = read_llama_config(f);
     if (!cfg) {
@@ -314,6 +321,9 @@ inline result<llama_model, model_error> load_llama(const gguf::gguf_file& f, std
     const llama_config& c = *cfg;
     if (max_ctx == 0) {
         return fail(model_errc::bad_value, "max_ctx");
+    }
+    if (max_batch == 0) {
+        return fail(model_errc::bad_value, "max_batch");
     }
     const std::size_t q_rows = c.n_head * c.head_dim;
     const std::size_t kv_rows = c.n_head_kv * c.head_dim;
@@ -330,7 +340,7 @@ inline result<llama_model, model_error> load_llama(const gguf::gguf_file& f, std
         std::memcpy(freq_factors.data(), f.tensor_data(*rf).data(), freq_factors.size() * sizeof(float));
     }
 
-    graph::graph_builder b;
+    graph::graph_builder b(max_batch);
     // Every weight is bound before it is used; the first failure is returned.
     std::optional<model_error> error;
     const auto weight = [&](const std::string& name, std::size_t rows, std::size_t cols) -> graph::matrix_ref {
@@ -402,14 +412,14 @@ inline result<llama_model, model_error> load_llama(const gguf::gguf_file& f, std
     if (error) {
         return std::move(*error);
     }
-    const graph::tensor_id logits = b.matmul(out, b.rms_norm(x, out_norm, c.rms_eps));
+    const graph::tensor_id logits = b.matmul(out, b.rms_norm(b.last_row(x), out_norm, c.rms_eps));
     b.output(logits);
 
     auto g = std::move(b).finalize();
     if (!g) {
         return model_error{model_errc::graph, {}, g.error()};
     }
-    return llama_model{c, std::move(*g), logits, max_ctx};
+    return llama_model{c, std::move(*g), logits, max_ctx, max_batch};
 }
 
 }  // namespace branes::synapse::models
