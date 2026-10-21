@@ -1,5 +1,8 @@
 # synapse
-Tensor compute engine, graph execution framework, and spatial processing system for Embodied AI 
+
+Tensor compute engine, graph execution framework, and spatial processing system for Embodied AI.
+
+`synapse` is the Branes.AI ML runtime layer: a modern C++20 tensor graph engine that loads GGML/GGUF models, plans their memory statically, and executes them on **MTL5** linear-algebra kernels. It sits between the deliberative layer that asks for inference and the hardware that runs it.
 
 ```text
                +------------------------------------+
@@ -21,3 +24,173 @@ Tensor compute engine, graph execution framework, and spatial processing system 
                |  (Model Predictive Control, VIO)  |
                +-----------------------------------+
 ```
+
+## Where synapse fits
+
+The Branes.AI platform is organized after the nervous system:
+
+| Repo | Biological analogue | Responsibility |
+|---|---|---|
+| [`cortex`](https://github.com/branes-ai/cortex) (upstream) | Cerebral cortex | Perception (VIO, SLAM, SfM), vision-language-action models, world building, path planning |
+| **`synapse`** (this repo) | The synapses: where signals are transmitted and computed | Tensor storage, graph construction, memory planning, and execution of ML models |
+| [`reflex`](https://github.com/branes-ai/reflex) (downstream) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, MPC, fault recovery |
+
+`cortex` decides *what* to compute (a VLA policy, a depth network, a learned motion model). `synapse` turns that model into a static, allocation-free compute graph and runs it. `reflex` consumes the results inside its bounded control loops and must never wait on anything that can allocate or stall, which is why synapse's execution path is designed to be deterministic as well.
+
+## Design: GGML compatibility, MTL5 math
+
+The core idea is a clean division of responsibilities:
+
+- **GGML is an ML environment.** It is a file format (GGUF), a DAG execution scheduler, and a static memory planner. Its model ecosystem (Llama, Phi, Mistral, Qwen, LLaVA, and custom policy networks, all quantized and distributed as `.gguf`) is the reason to be compatible with it.
+- **MTL5 is a math engine.** It provides C++20 concepts, expression templates, layout traits, vectorization, and number systems beyond IEEE floats through [Universal](https://github.com/stillwater-sc/universal) (posits, intervals, mixed precision, hardware-aligned types).
+
+`synapse` reimplements the ML-environment half in modern C++20 and delegates the math to MTL5. The result reads GGML artifacts unchanged without carrying GGML's C code, `void*` dispatch, or `switch (ggml_type)` kernels.
+
+```text
++-----------------------------------------------------------------------+
+|                       Model Weights & Config                          |
+|                         GGUF Parser / Loader                          |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                      C++20 Graph Builder                              |
+|          (Defines Nodes, Activations, Quantization Traits)            |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                    Static Memory Allocator                            |
+|        (Liveness Analysis -> Reusable MTL5 Slab Allocator)            |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                     Graph Execution Scheduler                         |
+|       (Topological Sort -> Node Dispatch -> Expression Fused)         |
++-----------------------------------------------------------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                       MTL5 Operator Kernels                           |
+|      dense2D<T>, views, matmul, block-quantized (Q4_K, Q8_0, ...)     |
++-----------------------------------------------------------------------+
+```
+
+### Components
+
+**GGUF frontend.** A native GGUF parser memory-maps the model file (POSIX `mmap`, Windows `CreateFileMapping`), reads the metadata key/value pairs (architecture, head counts, context length, embedding width) and the tensor-info table (shape, element type, offset), and binds tensor data to non-owning MTL5 views. Weights are never copied.
+
+**Graph builder.** A strongly typed DAG of operations (`MatMul`, `RoPE`, `RMSNorm`, `Softmax`, ...) built from the model architecture. Element and quantization types are part of the node types, so mismatches are compile errors rather than runtime `switch` defaults.
+
+**Static memory planner.** Before the first inference, a liveness pass computes the lifetime of every intermediate activation. Activations whose lifetimes do not overlap alias the same offset in one contiguous arena. Inference then performs no heap allocation, which is the property that makes GGML practical on embedded targets and the property `reflex` depends on.
+
+**Execution engine.** The scheduler walks the graph in topological order and dispatches each node to an MTL5 kernel selected by concepts and traits instead of function pointers:
+
+```cpp
+template <typename WeightType, typename InputType, typename OutputType>
+struct matmul_node : graph_node {
+    mtl::matrix_view<WeightType> weights;
+    mtl::vector_view<InputType>  input;
+    mtl::vector_view<OutputType> output;
+
+    void execute() override {
+        // MTL5 handles block-scale unpacking, vectorization,
+        // and expression-template fusion.
+        output = mtl::matmul(weights, input);
+    }
+};
+```
+
+### Migration path for GGML users
+
+**Tier 1: model compatibility.** Any standard `.gguf` file, downloaded from Hugging Face or produced by the `llama.cpp` conversion tools, loads without conversion.
+
+```cpp
+auto model  = branes::synapse::load_model("llama-3.2-1b-instruct.Q4_K_M.gguf");
+auto logits = model.forward(input_tokens);
+```
+
+**Tier 2: API mirroring.** A C++20 surface that maps GGML's graph-construction concepts onto type-safe, scoped handles:
+
+| GGML C API | synapse / MTL5 C++20 | Benefit |
+|---|---|---|
+| `struct ggml_tensor*` | `tensor<T, Layout>` | Type safety, bounds and layout traits |
+| `ggml_add(ctx, a, b)` | `a + b` | Expression templates, lazy evaluation and fusion |
+| `ggml_mul_mat(ctx, w, x)` | `matmul(w, x)` | Dispatch to vectorized / quantized MTL5 GEMM |
+| `enum ggml_type` | `quantized<Scheme>` | Extensible compile-time type system (posits, custom bit widths) |
+
+## Roadmap
+
+1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Started: the GGML tensor-type table, `branes/synapse/gguf/tensor_type.hpp`.)*
+2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers.
+3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products.
+4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution.
+5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`.
+
+## Building and testing
+
+`synapse` is a header-only C++20 library (`branes::synapse`). It requires CMake >= 4.0 and Ninja, and builds with GCC, Clang, and MSVC.
+
+```bash
+cmake --preset gcc-debug              # also: gcc-release, clang-debug, clang-release, msvc, msvc-ninja, ...
+cmake --build --preset gcc-debug
+ctest --preset gcc-debug
+```
+
+Dependencies are pinned in [`cmake/deps.cmake`](cmake/deps.cmake) and resolved the same way as in `cortex` and `reflex`: an installed package found by `find_package` wins, otherwise the headers are fetched with FetchContent.
+
+| Dependency | Role | When |
+|---|---|---|
+| [MTL5](https://github.com/stillwater-sc/mtl5) | Math engine; part of the `branes::synapse` interface | Always |
+| [Universal](https://github.com/stillwater-sc/universal) | Number systems (posit, cfloat, fixpnt) for the type-generic tests | Tests only |
+| [Catch2](https://github.com/catchorg/Catch2) v3 | Test framework | Tests only |
+
+To develop against local checkouts of the Stillwater sister projects (no network):
+
+```bash
+cmake --preset gcc-debug \
+  -DFETCHCONTENT_SOURCE_DIR_MTL5=/path/to/mtl5 \
+  -DFETCHCONTENT_SOURCE_DIR_UNIVERSAL=/path/to/universal
+```
+
+Use it from another CMake project:
+
+```cmake
+FetchContent_Declare(synapse GIT_REPOSITORY https://github.com/branes-ai/synapse.git GIT_TAG <release tag>)
+FetchContent_MakeAvailable(synapse)
+target_link_libraries(my_target PRIVATE branes::synapse)
+```
+
+Tests and benchmarks are only built when synapse is the top-level project, so consumers fetch MTL5 and nothing else.
+
+### Adding tests
+
+Drop a `<name>.cpp` into `tests/sdk/` (unit tests) or `tests/examples/` (end-to-end examples). [`cmake/compile_all.cmake`](cmake/compile_all.cmake) builds one Catch2 executable per file and registers every `TEST_CASE` with CTest; no CMake edit is needed. File stems must be unique. Project targets compile with strict warnings as errors ([`cmake/warnings.cmake`](cmake/warnings.cmake)).
+
+### CI and releases
+
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): clang-format lint, then build and test on Linux (GCC and Clang, Debug and Release) and Windows (MSVC, Debug and Release).
+- **Conventional Commits** are enforced on PRs by [commitlint](commitlint.config.cjs).
+- **release-please** turns merged commits into a release PR, `CHANGELOG.md`, and a `vX.Y.Z` tag.
+
+## Repository layout
+
+```text
+synapse/
+├── bench/        # micro-benchmarks (kernel throughput / latency)
+├── cmake/        # dependency pins, test/warning helpers
+├── docs/         # design notes, assessments, session records
+├── scripts/      # developer and CI helper scripts
+├── sdk/          # the header-only library: sdk/include/branes/synapse/
+├── tests/        # Catch2 regression tests, one executable per file
+└── tools/        # host-side developer tools (model inspection, logit diffing)
+```
+
+## Status
+
+Early stage. Build, dependency management, and CI are in place, mirroring `cortex` and `reflex`. The first code is the GGML tensor-type table that the GGUF parser builds on, plus an example that runs a mixed-precision matrix-vector product through MTL5 and Universal.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

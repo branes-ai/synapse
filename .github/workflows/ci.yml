@@ -1,0 +1,108 @@
+name: Synapse CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A new push to a PR supersedes its in-flight run; runs on main are never
+# cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Top-level least-privilege default.
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint (clang-format)
+    # 24.04 for a clang-format (18.x) that supports the IncludeBlocks/Regroup
+    # options in .clang-format.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+      - name: clang-format version
+        # Preinstalled on ubuntu-24.04 (runner-images: clang 18 default, with the
+        # clang-format alternative). No apt step, so no mirror dependency.
+        run: clang-format --version
+      - name: clang-format --dry-run on tracked C/C++ sources
+        run: |
+          set -e
+          files=$(git ls-files '*.cpp' '*.hpp' '*.h' '*.cc' '*.cxx' '*.hxx')
+          if [ -z "$files" ]; then
+            echo "No C/C++ source files tracked — skipping clang-format."
+            exit 0
+          fi
+          echo "Checking $(echo "$files" | wc -l) files."
+          echo "$files" | xargs clang-format --dry-run --Werror
+
+  # Dual-compiler validation on Linux: GCC and Clang, Debug (contract asserts
+  # live) and Release (optimized, asserts compiled out).
+  build-and-test-linux:
+    name: Build and Test (Linux - ${{ matrix.preset }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [gcc-debug, gcc-release, clang-debug, clang-release]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+      - name: Compiler versions
+        # gcc/g++ 13 and clang/clang++ 18 are preinstalled on ubuntu-24.04; no apt
+        # step, so no dependency on the Ubuntu mirror.
+        run: |
+          g++ --version | head -1
+          clang++ --version | head -1
+      - name: Install CMake 4.x + Ninja
+        # The project requires CMake >= 4.0; runner images and distro apt
+        # packages can lag, so pin the toolchain explicitly.
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb  # v4.4.2
+        with:
+          cmakeVersion: "~4.0.0"
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
+
+  build-and-test-windows:
+    name: Build and Test (Windows - MSVC ${{ matrix.label }})
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { preset: msvc-ninja,       label: Release }
+          - { preset: msvc-ninja-debug, label: Debug }
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          persist-credentials: false
+      - name: Set up the MSVC environment (vcvars x64)
+        # The Ninja generator needs cl.exe on PATH and INCLUDE/LIB set.
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1.13.0
+        with:
+          arch: x64
+      - name: Install CMake 4.x + Ninja
+        # Runs after msvc-dev-cmd so it is prepended ahead of the VS-bundled
+        # CMake 3.x that vcvars puts on PATH.
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb  # v4.4.2
+        with:
+          cmakeVersion: "~4.0.0"
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}
