@@ -122,7 +122,7 @@ auto logits = model.forward(input_tokens);
 
 ## Roadmap
 
-1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Started: the GGML tensor-type table, `branes/synapse/gguf/tensor_type.hpp`.)*
+1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Done: `branes/synapse/gguf/`. Validated against llama.cpp's `gguf-py` reader and writer.)*
 2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers.
 3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products.
 4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution.
@@ -189,7 +189,26 @@ synapse/
 
 ## Status
 
-Early stage. Build, dependency management, and CI are in place, mirroring `cortex` and `reflex`. The first code is the GGML tensor-type table that the GGUF parser builds on, plus an example that runs a mixed-precision matrix-vector product through MTL5 and Universal.
+Early stage. Build, dependency management, and CI are in place, mirroring `cortex` and `reflex`. The GGUF loader is the first component: a zero-copy, no-throw parser for GGUF v2/v3 that validates the header, metadata, and tensor table of an untrusted file, plus a read-only memory mapping on POSIX and Windows.
+
+```cpp
+#include <branes/synapse/gguf/gguf.hpp>
+
+using namespace branes::synapse::gguf;
+
+auto file  = mapped_file::open("llama-3.2-1b-instruct.Q4_K_M.gguf");  // result<mapped_file>
+auto model = parse(file->bytes());                                    // result<gguf_file>
+if (!model) {
+    // to_string(model.error().code), model.error().offset: what failed, and where
+}
+auto arch   = model->get<std::string_view>("general.architecture");  // "llama"
+auto* vocab = model->get_array("tokenizer.ggml.tokens");
+for (const auto& t : model->tensors()) {
+    std::span<const std::byte> weights = model->tensor_data(t);       // view into the mapping
+}
+```
+
+Quantized tensor views (roadmap step 2) are next.
 
 ## License
 
