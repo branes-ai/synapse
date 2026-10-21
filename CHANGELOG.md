@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.0](https://github.com/branes-ai/synapse/compare/v0.1.1...v0.2.0) (2026-10-21)
+
+
+### Features
+
+* **gguf:** zero-copy, no-throw gguf v2/v3 parser and memory-mapped loader ([#5](https://github.com/branes-ai/synapse/issues/5)) ([eafbf89](https://github.com/branes-ai/synapse/commit/eafbf89f9c944975b5b94d30aeb242bdf60d3fcc))
+* **quant:** bit-exact ggml block formats and zero-copy quantized matrix views ([#6](https://github.com/branes-ai/synapse/issues/6)) ([fde741d](https://github.com/branes-ai/synapse/commit/fde741d52c6b1affcac84a71f52ba8900a1c95bf))
+
 ## [0.1.1](https://github.com/branes-ai/synapse/compare/v0.1.0...v0.1.1) (2026-10-21)
 
 
