@@ -245,10 +245,7 @@ public:
         if (size == 0) {
             return fail(graph_errc::empty_tensor);
         }
-        if (size > max_graph_bytes / sizeof(float)) {
-            return fail(graph_errc::too_large);  // I5: size * sizeof(float) must not wrap
-        }
-        const tensor_id t = add_tensor(size * sizeof(float), size, tensor_role::input);
+        const tensor_id t = add_floats(size, tensor_role::input);
         if (t != invalid_tensor) {
             g_.inputs_.push_back(t);
         }
@@ -269,7 +266,7 @@ public:
                 return kernels::gemv_scratch_bytes<S>(v.cols());
             },
             w);
-        const tensor_id out = add_tensor(rows(w) * sizeof(float), rows(w), tensor_role::intermediate);
+        const tensor_id out = add_floats(rows(w), tensor_role::intermediate);
         const tensor_id scratch = add_tensor(scratch_bytes, 0, tensor_role::scratch);
         if (out == invalid_tensor || scratch == invalid_tensor) {
             return invalid_tensor;
@@ -299,7 +296,7 @@ public:
         if (rows(gamma) != 1 || cols(gamma) != size_of(x)) {
             return fail(graph_errc::size_mismatch);
         }
-        const tensor_id out = add_tensor(size_of(x) * sizeof(float), size_of(x), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate);
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(op_rms_norm{x, gamma, eps, out});
         }
@@ -361,9 +358,19 @@ private:
         return g_.tensors_[t].size;
     }
 
-    /// Append a tensor, or fail with too_large if the graph would exceed
-    /// max_graph_bytes (I5). Pre: bytes did not wrap (callers derive it from
-    /// sizes already within the bound).
+    /// Append a float tensor of `size` elements. The only place a float
+    /// tensor's byte count is computed, so the multiplication is checked once
+    /// for every op: sizes can come from untrusted metadata (an input) or from
+    /// a weight view's row count, either of which can be large enough to wrap.
+    tensor_id add_floats(std::size_t size, tensor_role role) {
+        if (size > max_graph_bytes / sizeof(float)) {
+            return fail(graph_errc::too_large);  // I5: size * sizeof(float) must not wrap
+        }
+        return add_tensor(size * sizeof(float), size, role);
+    }
+
+    /// Append a tensor of `bytes` bytes, or fail with too_large if the graph
+    /// would exceed max_graph_bytes (I5).
     tensor_id add_tensor(std::size_t bytes, std::size_t size, tensor_role role) {
         if (bytes > max_graph_bytes - total_bytes_ ||
             (bytes + plan_alignment - 1) / plan_alignment * plan_alignment > max_graph_bytes - total_bytes_) {
@@ -382,7 +389,7 @@ private:
         if (size_of(a) != size_of(b)) {
             return fail(graph_errc::size_mismatch);
         }
-        const tensor_id out = add_tensor(size_of(a) * sizeof(float), size_of(a), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(a), tensor_role::intermediate);
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(Op{a, b, out});
         }
@@ -394,7 +401,7 @@ private:
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
-        const tensor_id out = add_tensor(size_of(x) * sizeof(float), size_of(x), tensor_role::intermediate);
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate);
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(Op{x, out});
         }
