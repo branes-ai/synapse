@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/branes-ai/synapse/compare/v0.4.0...v0.5.0) (2026-10-21)
+
+
+### Features
+
+* **models:** llama decode graph from gguf, verified against llama.cpp ([#14](https://github.com/branes-ai/synapse/issues/14)) ([c8dc436](https://github.com/branes-ai/synapse/commit/c8dc436fbf3fd6b08fe1a40974bd95c6ec0d7754))
+
 ## [0.4.0](https://github.com/branes-ai/synapse/compare/v0.3.1...v0.4.0) (2026-10-21)
 
 
