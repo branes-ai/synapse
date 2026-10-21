@@ -204,6 +204,18 @@ private:
     std::vector<tensor_id> outputs_;
 };
 
+// GCC 13 reports a false -Wstringop-overflow ("writing 1 byte into a region of
+// size 0") inside std::vector's reallocation once the builder's push_back calls
+// are inlined at -O3. Verified: GCC 13.5 warns; GCC 14.4 and 15.2 do not. GCC 12
+// is untested but shares the analysis, so it is included. The warning would
+// fail -Werror builds of every consumer, so it is silenced here, for this class
+// only and only on those compilers.
+#if defined(__GNUC__) && !defined(__clang__) && (__GNUC__ == 12 || __GNUC__ == 13)
+#define SYNAPSE_GCC_STRINGOP_WORKAROUND 1
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
+
 /// Builds a graph one operation at a time. Each method returns the result
 /// tensor; after the first error every method returns invalid_tensor and
 /// finalize() reports that error.
@@ -354,5 +366,10 @@ private:
     compute_graph g_;
     std::optional<graph_error> error_;
 };
+
+#if defined(SYNAPSE_GCC_STRINGOP_WORKAROUND)
+#pragma GCC diagnostic pop
+#undef SYNAPSE_GCC_STRINGOP_WORKAROUND
+#endif
 
 }  // namespace branes::synapse::graph
