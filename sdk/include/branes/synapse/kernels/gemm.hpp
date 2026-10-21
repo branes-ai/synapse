@@ -11,10 +11,15 @@
 /// Contract G1: row t of Y equals gemv(w, row t of X) bit for bit. Both
 /// accumulate block_kernel<S>::dot(unpack(row, i), a_t, i) over the blocks i
 /// in order, starting from 0.0f (see dot.hpp), and quantize the activations
-/// with the same function. (This assumes the compiler contracts multiply-adds
-/// the same way in both, as it does with contraction off, the tests' setting,
-/// or on targets without FMA.) So a prompt prefilled in batches leaves the
-/// same results as decoding it one token at a time.
+/// with the same function. So a prompt prefilled in batches leaves the same
+/// results as decoding it one token at a time.
+///
+/// G1 holds when the compiler does not fuse multiply-adds (FMA contraction),
+/// which could otherwise happen differently at gemm's and gemv's inlined
+/// accumulation sites. synapse's own targets build with -ffp-contract=off
+/// (cmake/numerics.cmake); MSVC does not contract by default, nor does any
+/// compiler for targets without FMA. A consumer that needs G1 on an FMA
+/// target with GCC or Clang compiles with -ffp-contract=off as well.
 ///
 /// gemm never allocates and never throws: the activations, their descriptors
 /// and the per-row accumulators live in caller-provided scratch.

@@ -38,6 +38,7 @@ endif()
 # Permissive licenses only.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/deps.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/warnings.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/numerics.cmake)
 
 add_subdirectory(sdk)
 
