@@ -196,18 +196,21 @@ Early stage. Build, dependency management, and CI are in place, mirroring `corte
 
 using namespace branes::synapse::gguf;
 
-auto file = mapped_file::open("llama-3.2-1b-instruct.Q4_K_M.gguf");  // result<mapped_file>
-if (!file) {
-    // file.error().code == errc::io_error, file.error().os_code: errno / GetLastError()
-}
-auto model = parse(file->bytes());                                   // result<gguf_file>
-if (!model) {
-    // to_string(model.error().code), model.error().offset: what failed, and where
-}
-auto arch   = model->get<std::string_view>("general.architecture");  // "llama"
-auto* vocab = model->get_array("tokenizer.ggml.tokens");
-for (const auto& t : model->tensors()) {
-    std::span<const std::byte> weights = model->tensor_data(t);       // view into the mapping
+bool load(const std::filesystem::path& path) {
+    auto file = mapped_file::open(path);  // result<mapped_file>
+    if (!file) {
+        return false;  // file.error().code == errc::io_error, file.error().os_code: errno / GetLastError()
+    }
+    auto model = parse(file->bytes());  // result<gguf_file>
+    if (!model) {
+        return false;  // to_string(model.error().code), model.error().offset: what failed, and where
+    }
+    auto arch   = model->get<std::string_view>("general.architecture");  // "llama"
+    auto* vocab = model->get_array("tokenizer.ggml.tokens");
+    for (const auto& t : model->tensors()) {
+        std::span<const std::byte> weights = model->tensor_data(t);  // view into the mapping
+    }
+    return true;  // keep `file` alive as long as `model` is used
 }
 ```
 

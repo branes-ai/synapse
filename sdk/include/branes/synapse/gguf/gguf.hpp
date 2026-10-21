@@ -3,9 +3,9 @@
 /// @brief Umbrella header for the GGUF loader.
 ///
 ///   auto file = branes::synapse::gguf::mapped_file::open("model.gguf");
-///   if (!file) { /* file.error() */ }
+///   if (!file) { return; /* file.error() */ }
 ///   auto model = branes::synapse::gguf::parse(file->bytes());
-///   if (!model) { /* model.error().code, model.error().offset */ }
+///   if (!model) { return; /* model.error().code, model.error().offset */ }
 ///   auto arch = model->get<std::string_view>("general.architecture");
 ///   for (const auto& t : model->tensors()) { auto bytes = model->tensor_data(t); }
 ///
