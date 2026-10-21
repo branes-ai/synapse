@@ -20,7 +20,7 @@
 #include <branes/synapse/tensor/quantized_view.hpp>
 
 #include <cassert>
-#include <cstddef>
+#include <cstddef>  // std::max_align_t
 #include <cstdint>
 #include <new>
 #include <span>
@@ -28,8 +28,12 @@
 
 namespace branes::synapse::kernels {
 
-/// Alignment gemv requires of its scratch buffer.
+/// Alignment gemv requires of its scratch buffer. It does not exceed the
+/// fundamental alignment, so any storage from ::operator new (for example a
+/// std::vector<std::byte>) or a max_align_t-aligned arena satisfies it.
 inline constexpr std::size_t gemv_scratch_alignment = alignof(quant::block_q8_k);
+static_assert(gemv_scratch_alignment <= alignof(std::max_align_t),
+              "gemv scratch must be satisfiable by default-aligned allocations");
 
 namespace detail {
 
