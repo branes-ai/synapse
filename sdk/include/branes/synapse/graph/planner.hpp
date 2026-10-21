@@ -39,10 +39,6 @@
 
 namespace branes::synapse::graph {
 
-/// Alignment of every tensor in the arena: a cache line, which also covers
-/// any SIMD load width and every scratch block type.
-inline constexpr std::size_t plan_alignment = 64;
-
 struct live_interval {
     std::size_t first = 0;
     std::size_t last = 0;

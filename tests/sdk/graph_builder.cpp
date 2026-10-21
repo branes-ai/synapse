@@ -6,6 +6,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstddef>
+#include <limits>
 #include <random>
 #include <variant>
 
@@ -119,5 +121,33 @@ TEST_CASE("graph_builder: rejects invalid operands, empty inputs, and bad output
         const tensor_id x = b.input(8);
         CHECK(b.rms_norm(x, gamma.view(), 1e-5f) == invalid_tensor);
         CHECK(std::move(b).finalize().error().code == graph_errc::size_mismatch);
+    }
+}
+
+TEST_CASE("graph_builder: rejects sizes whose byte counts would overflow", "[graph]") {
+    {
+        graph_builder b;
+        CHECK(b.input(std::numeric_limits<std::size_t>::max() / 2) == invalid_tensor);  // * sizeof(float) wraps
+        CHECK(std::move(b).finalize().error().code == graph_errc::too_large);
+    }
+    {
+        // Each input fits; together they exceed max_graph_bytes.
+        graph_builder b;
+        // Leave room for the alignment padding the bound also counts.
+        const std::size_t quarter = (max_graph_bytes / 4 - plan_alignment) / sizeof(float);
+        CHECK(b.input(quarter) != invalid_tensor);
+        CHECK(b.input(quarter) != invalid_tensor);
+        CHECK(b.input(quarter) != invalid_tensor);
+        CHECK(b.input(quarter) != invalid_tensor);
+        CHECK(b.input(quarter) == invalid_tensor);
+        CHECK(std::move(b).finalize().error().code == graph_errc::too_large);
+    }
+    {
+        // An op whose result would cross the bound fails too.
+        graph_builder b;
+        const tensor_id x = b.input(max_graph_bytes / sizeof(float) / 2);
+        CHECK(x != invalid_tensor);
+        CHECK(b.silu(x) == invalid_tensor);
+        CHECK(std::move(b).finalize().error().code == graph_errc::too_large);
     }
 }

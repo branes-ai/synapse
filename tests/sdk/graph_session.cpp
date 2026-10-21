@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
+#include <type_traits>
 #include <vector>
 
 using namespace branes::synapse;
@@ -152,6 +153,11 @@ double max_abs(const std::vector<double>& v) {
 }
 
 }  // namespace
+
+// session keeps a pointer to its graph, so constructing one from a temporary
+// must not compile.
+static_assert(!std::is_constructible_v<session, compute_graph&&>);
+static_assert(std::is_constructible_v<session, const compute_graph&>);
 
 TEST_CASE("graph_session: arena execution equals unaliased op-by-op execution bit for bit", "[graph][session]") {
     const weights w;

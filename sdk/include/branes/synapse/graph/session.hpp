@@ -49,6 +49,8 @@ public:
     explicit session(const compute_graph& g) : graph_(&g), plan_(plan(g)), arena_(allocate(plan_.arena_bytes)) {
         assert(plan_is_valid(g, plan_));  // S1
     }
+    /// The session keeps a pointer to its graph: a temporary would dangle.
+    session(const compute_graph&&) = delete;
 
     session(const session&) = delete;
     session& operator=(const session&) = delete;

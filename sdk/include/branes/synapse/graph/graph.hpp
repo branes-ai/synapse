@@ -34,6 +34,10 @@
 ///       node                                        — constrains nodes_, tensors_
 ///   I4: at least one output; outputs are distinct, non-scratch tensors
 ///                                                   — constrains outputs_
+///   I5: the sum of all tensor sizes, each rounded up to plan_alignment, is
+///       at most max_graph_bytes (sizes come from untrusted metadata; this
+///       keeps every byte count and arena offset free of overflow)
+///                                                   — constrains tensors_
 ///
 /// The builder is no-throw on bad input: graphs are built from model
 /// metadata (untrusted), so it records the first error and finalize()
@@ -60,6 +64,15 @@ using quant::tensor_type;
 
 /// Index of a tensor in its graph.
 using tensor_id = std::uint32_t;
+
+/// Alignment of every tensor in the arena: a cache line, which also covers
+/// any SIMD load width and every scratch block type.
+inline constexpr std::size_t plan_alignment = 64;
+
+/// Upper bound on a graph's total (aligned) tensor bytes. Every arena offset
+/// the planner computes is at most this total, so with the bound at half of
+/// size_t no planner arithmetic can wrap.
+inline constexpr std::size_t max_graph_bytes = std::numeric_limits<std::size_t>::max() / 2;
 
 /// The id the builder returns after an error; operations on it are no-ops.
 inline constexpr tensor_id invalid_tensor = std::numeric_limits<tensor_id>::max();
@@ -153,6 +166,7 @@ enum class graph_errc : std::uint32_t {
     empty_tensor,         ///< a zero-sized input or operand
     bad_output,           ///< output is invalid, scratch, or listed twice
     no_outputs,           ///< finalize() on a graph with no outputs
+    too_large,            ///< the graph's tensors would exceed max_graph_bytes
 };
 
 constexpr std::string_view to_string(graph_errc code) noexcept {
@@ -167,6 +181,8 @@ constexpr std::string_view to_string(graph_errc code) noexcept {
         return "invalid graph output";
     case graph_errc::no_outputs:
         return "graph has no outputs";
+    case graph_errc::too_large:
+        return "graph tensors too large";
     }
     return "unknown error";
 }
@@ -229,8 +245,13 @@ public:
         if (size == 0) {
             return fail(graph_errc::empty_tensor);
         }
+        if (size > max_graph_bytes / sizeof(float)) {
+            return fail(graph_errc::too_large);  // I5: size * sizeof(float) must not wrap
+        }
         const tensor_id t = add_tensor(size * sizeof(float), size, tensor_role::input);
-        g_.inputs_.push_back(t);
+        if (t != invalid_tensor) {
+            g_.inputs_.push_back(t);
+        }
         return t;
     }
 
@@ -250,6 +271,9 @@ public:
             w);
         const tensor_id out = add_tensor(rows(w) * sizeof(float), rows(w), tensor_role::intermediate);
         const tensor_id scratch = add_tensor(scratch_bytes, 0, tensor_role::scratch);
+        if (out == invalid_tensor || scratch == invalid_tensor) {
+            return invalid_tensor;
+        }
         g_.nodes_.emplace_back(op_matmul{w, x, out, scratch});
         return out;
     }
@@ -276,7 +300,9 @@ public:
             return fail(graph_errc::size_mismatch);
         }
         const tensor_id out = add_tensor(size_of(x) * sizeof(float), size_of(x), tensor_role::intermediate);
-        g_.nodes_.emplace_back(op_rms_norm{x, gamma, eps, out});
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_rms_norm{x, gamma, eps, out});
+        }
         return out;
     }
 
@@ -335,7 +361,15 @@ private:
         return g_.tensors_[t].size;
     }
 
+    /// Append a tensor, or fail with too_large if the graph would exceed
+    /// max_graph_bytes (I5). Pre: bytes did not wrap (callers derive it from
+    /// sizes already within the bound).
     tensor_id add_tensor(std::size_t bytes, std::size_t size, tensor_role role) {
+        if (bytes > max_graph_bytes - total_bytes_ ||
+            (bytes + plan_alignment - 1) / plan_alignment * plan_alignment > max_graph_bytes - total_bytes_) {
+            return fail(graph_errc::too_large);
+        }
+        total_bytes_ += (bytes + plan_alignment - 1) / plan_alignment * plan_alignment;
         g_.tensors_.push_back(tensor_desc{bytes, size, role});
         return static_cast<tensor_id>(g_.tensors_.size() - 1);
     }
@@ -349,7 +383,9 @@ private:
             return fail(graph_errc::size_mismatch);
         }
         const tensor_id out = add_tensor(size_of(a) * sizeof(float), size_of(a), tensor_role::intermediate);
-        g_.nodes_.emplace_back(Op{a, b, out});
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(Op{a, b, out});
+        }
         return out;
     }
 
@@ -359,12 +395,15 @@ private:
             return invalid_tensor;
         }
         const tensor_id out = add_tensor(size_of(x) * sizeof(float), size_of(x), tensor_role::intermediate);
-        g_.nodes_.emplace_back(Op{x, out});
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(Op{x, out});
+        }
         return out;
     }
 
     compute_graph g_;
     std::optional<graph_error> error_;
+    std::size_t total_bytes_ = 0;  ///< sum of aligned tensor bytes (I5)
 };
 
 #if defined(SYNAPSE_GCC_STRINGOP_WORKAROUND)
