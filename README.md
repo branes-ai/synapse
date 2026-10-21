@@ -235,12 +235,19 @@ Fused kernels compute `y = W x` without expanding the weights. `x` is quantized 
 ```cpp
 #include <branes/synapse/kernels/gemv.hpp>
 
-// At load time: size the scratch once, for the widest matrix the model uses.
-std::vector<std::byte> scratch(max_gemv_scratch_bytes);
+// At load time: size the scratch once, for the most demanding matrix.
+std::size_t scratch_bytes = 0;
+for (const auto& t : model->tensors()) {
+    visit_matrix(*model, t, [&](const auto& w) {
+        using S = typename std::decay_t<decltype(w)>::scheme_type;
+        scratch_bytes = std::max(scratch_bytes, kernels::gemv_scratch_bytes<S>(w.cols()));
+    });
+}
+std::vector<std::byte> scratch(scratch_bytes);
 
 // Per inference: no allocation.
 visit_matrix(*model, *wq, [&](const auto& w) {
-    kernels::gemv(w, x, y, scratch);  // needs gemv_scratch_bytes<scheme>(w.cols()) bytes
+    kernels::gemv(w, x, y, scratch);
 });
 ```
 
