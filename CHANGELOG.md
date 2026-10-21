@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/branes-ai/synapse/compare/v0.2.0...v0.3.0) (2026-10-21)
+
+
+### Features
+
+* **kernels:** fused quantized gemv with ggml-style integer dot products ([#8](https://github.com/branes-ai/synapse/issues/8)) ([253c273](https://github.com/branes-ai/synapse/commit/253c273f8963fa8cd4f3b1622b8ba140b9bd962a))
+
 ## [0.2.0](https://github.com/branes-ai/synapse/compare/v0.1.1...v0.2.0) (2026-10-21)
 
 
