@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: clang-format version
@@ -53,7 +53,7 @@ jobs:
       matrix:
         preset: [gcc-debug, gcc-release, clang-debug, clang-release]
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Compiler versions
@@ -86,17 +86,33 @@ jobs:
           - { preset: msvc-ninja,       label: Release }
           - { preset: msvc-ninja-debug, label: Debug }
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - name: Set up the MSVC environment (vcvars x64)
-        # The Ninja generator needs cl.exe on PATH and INCLUDE/LIB set.
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1.13.0
-        with:
-          arch: x64
+        # The Ninja generator needs cl.exe on PATH and INCLUDE/LIB set. Runs
+        # vcvars64.bat and exports every variable it adds or changes for the
+        # later steps. Inline rather than ilammy/msvc-dev-cmd, whose last
+        # release (v1.13.0, 2024) still targets the deprecated Node.js 20.
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vs) { throw "No Visual Studio installation with the x64 C++ tools found" }
+          $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+          $before = @{}
+          Get-ChildItem env: | ForEach-Object { $before[$_.Name] = $_.Value }
+          $lines = cmd /c "`"$vcvars`" >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvars64.bat failed ($LASTEXITCODE)" }
+          foreach ($line in $lines) {
+            if ($line -match '^([^=]+)=(.*)$' -and $before[$matches[1]] -ne $matches[2]) {
+              "$($matches[1])=$($matches[2])" >> $env:GITHUB_ENV
+            }
+          }
       - name: Install CMake 4.x + Ninja
-        # Runs after msvc-dev-cmd so it is prepended ahead of the VS-bundled
-        # CMake 3.x that vcvars puts on PATH.
+        # Runs after the vcvars step so it is prepended ahead of the
+        # VS-bundled CMake 3.x that vcvars puts on PATH.
         uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb  # v4.4.2
         with:
           cmakeVersion: "~4.0.0"
