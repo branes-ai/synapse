@@ -6,10 +6,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <random>
 #include <variant>
+#include <vector>
 
 using namespace branes::synapse::graph;
 using synapse_test::random_matrix;
@@ -150,4 +153,82 @@ TEST_CASE("graph_builder: rejects sizes whose byte counts would overflow", "[gra
         CHECK(b.silu(x) == invalid_tensor);
         CHECK(std::move(b).finalize().error().code == graph_errc::too_large);
     }
+}
+
+TEST_CASE("graph_builder: embed, rope, and attention over a KV cache", "[graph][attention]") {
+    std::mt19937 rng(5);
+    const random_matrix<tensor_type::q8_0> table(100, 64, rng);
+    graph_builder b;
+    const tensor_id x = b.embed(table.view());
+    const tensor_id q = b.rope(x, 16, 10000.0f);          // 4 heads
+    const tensor_id k = b.rope(b.silu(x), 16, 10000.0f);  // stands in for Wk x
+    const tensor_id v = b.silu(x);
+    const state_id small = b.kv_cache(32, 4, 16);
+    const state_id large = b.kv_cache(64, 4, 16);
+    const tensor_id a = b.attention(q, k, v, small, 4, 0.25f);
+    const tensor_id a2 = b.attention(q, k, v, large, 4, 0.25f);
+    b.output(b.add(a, a2));
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+
+    CHECK(g->inputs().empty());  // the token arrives with the run
+    CHECK(g->token_limit() == 100);
+    CHECK(g->position_limit() == 32);  // the smaller cache bounds the positions
+    REQUIRE(g->states().size() == 2);
+    CHECK(g->states()[small].bytes == 2 * 32 * 4 * 16 * sizeof(std::uint16_t));
+    const auto& op = std::get<op_attention>(g->nodes()[5]);
+    CHECK(operands(g->nodes()[5]) == std::vector<tensor_id>{q, k, v});
+    CHECK(results(g->nodes()[5]) == std::vector<tensor_id>{a, op.scratch});
+    CHECK(g->tensors()[op.scratch].role == tensor_role::scratch);
+    CHECK(g->tensors()[op.scratch].bytes ==
+          branes::synapse::kernels::attention_scratch_floats(4, 4, 16, 32) * sizeof(float));
+}
+
+TEST_CASE("graph_builder: rejects head layouts and parameters that do not fit", "[graph][attention]") {
+    const auto error_of = [](auto build) {
+        graph_builder b;
+        build(b);
+        return std::move(b).finalize().error().code;
+    };
+    // rope (I6)
+    CHECK(error_of([](graph_builder& b) { b.rope(b.input(30), 15, 1e4f); }) == graph_errc::bad_shape);  // odd head
+    CHECK(error_of([](graph_builder& b) { b.rope(b.input(30), 4, 1e4f); }) == graph_errc::bad_shape);   // 7.5 heads
+    CHECK(error_of([](graph_builder& b) {
+              const float f[3] = {1, 1, 1};
+              b.rope(b.input(32), 8, 1e4f, f);  // needs 4 factors
+          }) == graph_errc::bad_shape);
+    CHECK(error_of([](graph_builder& b) { b.rope(b.input(32), 8, std::nanf("")); }) == graph_errc::bad_parameter);
+    CHECK(error_of([](graph_builder& b) {
+              const float f[4] = {1, 0, 1, 1};
+              b.rope(b.input(32), 8, 1e4f, f);
+          }) == graph_errc::bad_parameter);
+    // kv_cache
+    CHECK(error_of([](graph_builder& b) { b.kv_cache(0, 2, 8); }) == graph_errc::bad_shape);
+    CHECK(error_of([](graph_builder& b) { b.kv_cache(8, 2, branes::synapse::kernels::max_head_dim + 2); }) ==
+          graph_errc::bad_shape);
+    CHECK(error_of([](graph_builder& b) { b.kv_cache(std::size_t{1} << 30, std::size_t{1} << 28, 64); }) ==
+          graph_errc::too_large);
+    // attention
+    const auto attend = [](std::size_t q_size, std::size_t n_heads, float scale) {
+        return [=](graph_builder& b) {
+            const tensor_id q = b.input(q_size);
+            const tensor_id kv = b.input(16);  // 2 KV heads of 8
+            b.attention(q, kv, kv, b.kv_cache(8, 2, 8), n_heads, scale);
+        };
+    };
+    CHECK(error_of(attend(24, 3, 1.0f)) == graph_errc::bad_shape);  // 3 heads on 2 KV heads
+    CHECK(error_of(attend(24, 4, 1.0f)) == graph_errc::bad_shape);  // q is not 4 heads of 8
+    CHECK(error_of(attend(32, 4, 0.0f)) == graph_errc::bad_parameter);
+    CHECK(error_of([](graph_builder& b) {
+              const tensor_id t = b.input(16);
+              b.attention(t, t, t, 0, 2, 1.0f);  // no such state
+          }) == graph_errc::bad_state);
+    CHECK(error_of([](graph_builder& b) {
+              const tensor_id t = b.input(16);
+              const state_id c = b.kv_cache(8, 2, 8);
+              b.attention(t, t, t, c, 2, 1.0f);
+              b.attention(t, t, t, c, 2, 1.0f);  // I7: one writer per cache
+          }) == graph_errc::bad_state);
+    // embed
+    CHECK(error_of([](graph_builder& b) { b.embed(matrix_ref{}); }) == graph_errc::empty_tensor);
 }

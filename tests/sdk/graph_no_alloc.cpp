@@ -1,9 +1,13 @@
 // session::run() must not allocate (invariant I4 of the step-4 design: the
-// arena is allocated once, at construction). This test replaces the global
-// allocation functions for its own executable, counts calls while armed, and
-// runs a full decode-step graph with the counter armed.
+// arena and the states are allocated once, at construction). This test
+// replaces the global allocation functions for its own executable, counts
+// calls while armed, and runs a decode-step graph and then a whole Llama
+// model (embedding, RoPE, attention over a growing KV cache) with the counter
+// armed.
 
+#include <branes/synapse/gguf/mapped_file.hpp>
 #include <branes/synapse/graph/session.hpp>
+#include <branes/synapse/models/llama.hpp>
 
 #include "../support/random_weights.hpp"
 
@@ -14,6 +18,7 @@
 #include <cstdlib>
 #include <new>
 #include <random>
+#include <string>
 
 namespace {
 
@@ -49,8 +54,21 @@ void aligned_free(void* p) noexcept {
 
 }  // namespace
 
-// Replacements for the global allocation functions. The array and nothrow
-// forms default to these, so counting here covers them too.
+// Replacements for every global allocation function. The standard makes the
+// array and nothrow forms call the plain ones by default, but sanitizers
+// (ASan) interpose those forms themselves: replacing only some of them would
+// pair ASan's operator new with this file's free (std::stable_sort's
+// temporary buffer comes from the nothrow form). Every form is replaced, so
+// allocation and release always match.
+//
+// GCC (15.2, at -O3) inlines these replacements into the standard library's
+// containers and then flags the std::free in operator delete as freeing a
+// pointer from a "mismatched" allocation function, although the matching
+// operator new is the malloc just below. The pairing is correct by
+// construction; the warning is silenced for this test executable only.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
 void* operator new(std::size_t n) {
     note();
     if (void* p = std::malloc(n == 0 ? 1 : n)) {
@@ -82,6 +100,55 @@ void operator delete[](void* p, std::align_val_t) noexcept {
     aligned_free(p);
 }
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept {
+    aligned_free(p);
+}
+void* operator new[](std::size_t n) {
+    return ::operator new(n);
+}
+void operator delete[](void* p) noexcept {
+    std::free(p);
+}
+void operator delete[](void* p, std::size_t) noexcept {
+    std::free(p);
+}
+void* operator new(std::size_t n, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(n);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t n, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(n);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void operator delete(void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+void operator delete[](void* p, const std::nothrow_t&) noexcept {
+    std::free(p);
+}
+void* operator new(std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(n, a);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void* operator new[](std::size_t n, std::align_val_t a, const std::nothrow_t&) noexcept {
+    try {
+        return ::operator new(n, a);
+    } catch (...) {
+        return nullptr;
+    }
+}
+void operator delete(void* p, std::align_val_t, const std::nothrow_t&) noexcept {
+    aligned_free(p);
+}
+void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcept {
     aligned_free(p);
 }
 
@@ -120,8 +187,32 @@ TEST_CASE("graph_no_alloc: session::run performs no allocation", "[graph][sessio
     allocations = 0;
 
     armed = true;
-    s.run();
-    s.run();
+    const bool first = s.run();
+    const bool second = s.run();
     armed = false;
+    CHECK(first);
+    CHECK(second);
+    CHECK(allocations == 0);
+}
+
+TEST_CASE("graph_no_alloc: decoding a Llama model performs no allocation", "[graph][session][llama]") {
+    using namespace branes::synapse;
+    auto file = gguf::mapped_file::open(std::string(SYNAPSE_TEST_DATA_DIR) + "/llama_tiny.gguf");
+    REQUIRE(file);
+    auto parsed = gguf::parse(file->bytes());
+    REQUIRE(parsed);
+    constexpr std::uint32_t n_tokens = 16;
+    auto model = models::load_llama(*parsed, n_tokens);
+    REQUIRE(model);
+    session s{model->graph};  // the allocations: the arena and the KV cache
+
+    allocations = 0;
+    armed = true;
+    bool all_ran = true;
+    for (std::uint32_t pos = 0; pos < n_tokens; ++pos) {
+        all_ran = s.run({pos * 7 % 512, pos}) && all_ran;
+    }
+    armed = false;
+    CHECK(all_ran);
     CHECK(allocations == 0);
 }
