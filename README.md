@@ -123,7 +123,7 @@ auto logits = model.forward(input_tokens);
 ## Roadmap
 
 1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Done: `branes/synapse/gguf/`. Validated against llama.cpp's `gguf-py` reader and writer.)*
-2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers.
+2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
 3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products.
 4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution.
 5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`.
@@ -183,7 +183,7 @@ synapse/
 ├── docs/         # design notes, assessments, session records
 ├── scripts/      # developer and CI helper scripts
 ├── sdk/          # the header-only library: sdk/include/branes/synapse/
-├── tests/        # Catch2 regression tests, one executable per file
+├── tests/        # Catch2 regression tests, one executable per file; data/ holds golden fixtures
 └── tools/        # host-side developer tools (model inspection, logit diffing)
 ```
 
@@ -214,7 +214,20 @@ bool load(const std::filesystem::path& path) {
 }
 ```
 
-Quantized tensor views (roadmap step 2) are next.
+Weights are then viewed in their storage format without copying. `visit_matrix` turns the tensor's runtime type tag into a compile-time scheme once, at the boundary:
+
+```cpp
+#include <branes/synapse/gguf/tensor_view.hpp>
+
+const auto* wq = model->find_tensor("blk.0.attn_q.weight");
+visit_matrix(*model, *wq, [](const auto& view) {   // quantized_matrix_view<scheme<q4_k>>, ...
+    std::vector<float> row(view.cols());
+    view.dequantize_row(0, row);                    // reference decode of one row
+    mtl::mat::dense2D<float> w = view.to_dense();   // or the whole matrix, as MTL5
+});
+```
+
+Fused quantized kernels (roadmap step 3) are next.
 
 ## License
 
