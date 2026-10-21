@@ -2,38 +2,48 @@
 
 Tensor compute engine, graph execution framework, and spatial processing system for Embodied AI.
 
-`synapse` is the Branes.AI ML runtime layer: a modern C++20 tensor graph engine that loads GGML/GGUF models, plans their memory statically, and executes them on **MTL5** linear-algebra kernels. It sits between the deliberative layer that asks for inference and the hardware that runs it.
+`synapse` is the Branes.AI ML runtime layer: a modern C++20 tensor graph engine that loads GGML/GGUF models, plans their memory statically, and executes them on **MTL5** linear-algebra kernels. It is one of three sister platform repos, alongside `cortex` and `reflex`, that mission applications are built from.
 
 ```text
-               +------------------------------------+
-               |          Branes Cortex             |
-               |  (Perception, VLA, Path Planning)  |
-               +------------------------------------+
-                                 |
-                                 v
-+------------------------------------------------------------------+
-|                          Branes Synapse                          |
-|    Modern C++20 Tensor Graph Engine & ML Runtime Layer           |
-|    - GGUF Parser / Memory Mapper                                 |
-|    - Static DAG Scheduler & Arena Memory Planner                 |
-+------------------------------------------------------------------+
-                                 |
-                                 v
-               +-----------------------------------+
-               |          Branes Reflex            |
-               |  (Model Predictive Control, VIO)  |
-               +-----------------------------------+
++--------------+ +-------------------+ +-----------+ +------------+
+| racing-drone | | interceptor-drone | | isr-drone | | nano-drone | ...  Mission
++--------------+ +-------------------+ +-----------+ +------------+
+        |                  |                 |              |
+        v                  v                 v              v
++---------------------+ +---------------------+ +---------------------+
+|    Branes Cortex    | |   Branes Synapse    | |    Branes Reflex    |  Platform
+| perception (VIO,    | | tensor graph engine | | stabilization, MPC, |
+| SLAM), VLA, world   | | for GGUF models,    | | state propagation,  |
+| model, planning     | | static memory plan  | | fault recovery      |
++---------------------+ +---------------------+ +---------------------+
+           |                       |                       |
+           v                       v                       v
++---------------------------------+ +---------------------------------+
+|              MTL5               | |            Universal            |  Math
+| high-performance linear algebra | |       computer arithmetic       |
++---------------------------------+ +---------------------------------+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
++-----------+ +-------------------+ +-------------------+ +-----------+
+|    CPU    | |     CPU + GPU     | |     CPU + KPU     | |    KPU    |  Hardware
++-----------+ +-------------------+ +-------------------+ +-----------+
 ```
 
 ## Where synapse fits
 
-The Branes.AI platform is organized after the nervous system:
+The Branes.AI stack has four tiers:
+
+- **Mission**: one repo per vehicle and mission (`racing-drone`, `interceptor-drone`, `isr-drone`, `nano-drone`, ...). It owns the mission capability and composes platform components; algorithms do not live there.
+- **Platform**: three sister repos, `cortex`, `synapse`, and `reflex`, that provide the functionality and services a mission is built from. None of them sits above the others.
+- **Math**: [MTL5](https://github.com/stillwater-sc/mtl5) provides high-performance linear algebra and [Universal](https://github.com/stillwater-sc/universal) provides computer arithmetic (posits, intervals, mixed precision, hardware-aligned types).
+- **Hardware**: the targets the stack runs on: CPU, CPU + GPU, CPU + KPU, and KPU.
+
+The platform repos are organized after the nervous system:
 
 | Repo | Biological analogue | Responsibility |
 |---|---|---|
-| [`cortex`](https://github.com/branes-ai/cortex) (upstream) | Cerebral cortex | Perception (VIO, SLAM, SfM), vision-language-action models, world building, path planning |
+| [`cortex`](https://github.com/branes-ai/cortex) | Cerebral cortex | Perception (VIO, SLAM, SfM), vision-language-action models, world building, path planning |
 | **`synapse`** (this repo) | The synapses: where signals are transmitted and computed | Tensor storage, graph construction, memory planning, and execution of ML models |
-| [`reflex`](https://github.com/branes-ai/reflex) (downstream) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, MPC, fault recovery |
+| [`reflex`](https://github.com/branes-ai/reflex) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, IMU state propagation of the `cortex` estimate, MPC, fault recovery |
 
 `cortex` decides *what* to compute (a VLA policy, a depth network, a learned motion model). `synapse` turns that model into a static, allocation-free compute graph and runs it. `reflex` consumes the results inside its bounded control loops and must never wait on anything that can allocate or stall, which is why synapse's execution path is designed to be deterministic as well.
 
