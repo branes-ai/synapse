@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/branes-ai/synapse/compare/v0.3.0...v0.3.1) (2026-10-21)
+
+
+### Continuous Integration
+
+* release every merge automatically ([#10](https://github.com/branes-ai/synapse/issues/10)) ([4ff3810](https://github.com/branes-ai/synapse/commit/4ff3810725192dd546d1d78d735fdedf489c8bbb))
+
 ## [0.3.0](https://github.com/branes-ai/synapse/compare/v0.2.0...v0.3.0) (2026-10-21)
 
 
