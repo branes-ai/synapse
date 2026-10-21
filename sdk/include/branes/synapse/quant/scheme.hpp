@@ -8,6 +8,12 @@
 /// schemes with one element per block, so kernels and views treat every
 /// format uniformly.
 ///
+/// `vec_dot_block` names the activation format a scheme's fused dot product
+/// consumes (roadmap step 3): Q8_0 blocks for the legacy formats, Q8_K blocks
+/// for the K formats, and plain float for F32/F16/BF16. It matches ggml's
+/// vec_dot_type, except that plain formats keep float activations where ggml
+/// rounds them to the weight format.
+///
 /// `scheme<T>` is only defined for the formats synapse can decode; `has_scheme`
 /// tests that. Each specialization is checked against tensor_type_traits, so
 /// the block geometry the parser validated and the geometry the decoder
@@ -16,6 +22,7 @@
 #include <branes/synapse/gguf/tensor_type.hpp>
 #include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/blocks.hpp>
+#include <branes/synapse/quant/q8.hpp>
 
 #include <concepts>
 #include <cstddef>
@@ -41,9 +48,10 @@ Block load_block(const std::byte* src) noexcept {
     return b;
 }
 
-template <typename Block, tensor_type T, std::size_t BlockSize>
+template <typename Block, tensor_type T, std::size_t BlockSize, typename VecDotBlock>
 struct block_scheme {
     using block_type = Block;
+    using vec_dot_block = VecDotBlock;
     static constexpr tensor_type type = T;
     static constexpr std::size_t block_size = BlockSize;
     static constexpr std::size_t type_size = sizeof(Block);
@@ -57,6 +65,7 @@ struct block_scheme {
 
 template <>
 struct scheme<tensor_type::f32> {
+    using vec_dot_block = float;
     using block_type = float;
     static constexpr tensor_type type = tensor_type::f32;
     static constexpr std::size_t block_size = 1;
@@ -69,6 +78,7 @@ struct scheme<tensor_type::f32> {
 
 template <>
 struct scheme<tensor_type::f16> {
+    using vec_dot_block = float;
     using block_type = std::uint16_t;  ///< binary16 bits
     static constexpr tensor_type type = tensor_type::f16;
     static constexpr std::size_t block_size = 1;
@@ -81,6 +91,7 @@ struct scheme<tensor_type::f16> {
 
 template <>
 struct scheme<tensor_type::bf16> {
+    using vec_dot_block = float;
     using block_type = std::uint16_t;  ///< bfloat16 bits
     static constexpr tensor_type type = tensor_type::bf16;
     static constexpr std::size_t block_size = 1;
@@ -92,18 +103,19 @@ struct scheme<tensor_type::bf16> {
 };
 
 template <>
-struct scheme<tensor_type::q4_0> : detail::block_scheme<block_q4_0, tensor_type::q4_0, qk_legacy> {};
+struct scheme<tensor_type::q4_0> : detail::block_scheme<block_q4_0, tensor_type::q4_0, qk_legacy, block_q8_0> {};
 template <>
-struct scheme<tensor_type::q8_0> : detail::block_scheme<block_q8_0, tensor_type::q8_0, qk_legacy> {};
+struct scheme<tensor_type::q8_0> : detail::block_scheme<block_q8_0, tensor_type::q8_0, qk_legacy, block_q8_0> {};
 template <>
-struct scheme<tensor_type::q4_k> : detail::block_scheme<block_q4_k, tensor_type::q4_k, qk_k> {};
+struct scheme<tensor_type::q4_k> : detail::block_scheme<block_q4_k, tensor_type::q4_k, qk_k, block_q8_k> {};
 template <>
-struct scheme<tensor_type::q6_k> : detail::block_scheme<block_q6_k, tensor_type::q6_k, qk_k> {};
+struct scheme<tensor_type::q6_k> : detail::block_scheme<block_q6_k, tensor_type::q6_k, qk_k, block_q8_k> {};
 
 /// A storage format: block type, geometry, and a block dequantizer.
 template <typename S>
 concept Scheme = requires(const std::byte* src, float* dst) {
     typename S::block_type;
+    typename S::vec_dot_block;
     { S::type } -> std::convertible_to<tensor_type>;
     { S::block_size } -> std::convertible_to<std::size_t>;
     { S::type_size } -> std::convertible_to<std::size_t>;
