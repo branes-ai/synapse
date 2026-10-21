@@ -199,7 +199,7 @@ using namespace branes::synapse::gguf;
 bool load(const std::filesystem::path& path) {
     auto file = mapped_file::open(path);  // result<mapped_file>
     if (!file) {
-        return false;  // file.error().code == errc::io_error, file.error().os_code: errno / GetLastError()
+        return false;  // errc::io_error (os_code: errno / GetLastError()) or errc::truncated (empty file)
     }
     auto model = parse(file->bytes());  // result<gguf_file>
     if (!model) {
