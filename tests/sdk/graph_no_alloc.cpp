@@ -216,3 +216,24 @@ TEST_CASE("graph_no_alloc: decoding a Llama model performs no allocation", "[gra
     CHECK(all_ran);
     CHECK(allocations == 0);
 }
+
+TEST_CASE("graph_no_alloc: batched prefill performs no allocation", "[graph][session][llama][batch]") {
+    using namespace branes::synapse;
+    auto file = gguf::mapped_file::open(std::string(SYNAPSE_TEST_DATA_DIR) + "/llama_tiny.gguf");
+    REQUIRE(file);
+    auto parsed = gguf::parse(file->bytes());
+    REQUIRE(parsed);
+    auto model = models::load_llama(*parsed, 16, 8);
+    REQUIRE(model);
+    session s{model->graph};
+    const std::uint32_t tokens[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+    allocations = 0;
+    armed = true;
+    const bool first = s.run(batch{tokens, 0});
+    const bool second = s.run(batch{std::span<const std::uint32_t>(tokens, 5), 8});
+    armed = false;
+    CHECK(first);
+    CHECK(second);
+    CHECK(allocations == 0);
+}

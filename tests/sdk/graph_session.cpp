@@ -70,8 +70,8 @@ struct decode_graph {
 };
 
 template <typename Weights>
-decode_graph build(const Weights& w) {
-    graph_builder b;
+decode_graph build(const Weights& w, std::size_t max_batch = 1) {
+    graph_builder b(max_batch);
     const tensor_id x = b.input(d);
     const tensor_id h = b.rms_norm(x, w.g1.view(), eps);
     const tensor_id gate = b.matmul(w.w_gate.view(), h);
@@ -288,4 +288,49 @@ TEST_CASE("graph_session: runs check the step against the graph's limits", "[gra
     for (std::size_t i = 0; i < 16; ++i) {
         CHECK(s.tensor(a)[i] == fp16_to_float(float_to_fp16(row[i])));
     }
+}
+
+TEST_CASE("graph_session: a batch of rows equals running each row alone, bit for bit", "[graph][session][batch]") {
+    const weights w;
+    const auto single = build(w);
+    const auto batched = build(w, 5);
+    std::mt19937 rng(17);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    std::vector<float> xs(5 * d);
+    for (auto& v : xs) {
+        v = normal(rng);
+    }
+
+    session sb{batched.g};
+    std::copy(xs.begin(), xs.end(), sb.tensor(batched.x).begin());
+    const std::uint32_t tokens[5] = {};
+    REQUIRE(sb.run(batch{tokens, 0}));
+
+    session s1{single.g};
+    for (std::size_t i = 0; i < 5; ++i) {
+        std::copy_n(xs.begin() + static_cast<std::ptrdiff_t>(i * d), d, s1.tensor(single.x).begin());
+        REQUIRE(s1.run());
+        CHECK(bit_equal(s1.tensor(single.probs), sb.tensor(batched.probs).subspan(i * vocab, vocab)));
+        CHECK(bit_equal(s1.tensor(single.residual), sb.tensor(batched.residual).subspan(i * d, d)));
+    }
+}
+
+TEST_CASE("graph_session: batched runs check size, positions, and every token", "[graph][session][batch]") {
+    std::mt19937 rng(4);
+    const random_matrix<tensor_type::f32> table(10, 16, rng, -1.0f, 1.0f);
+    graph_builder b(4);
+    const tensor_id x = b.embed(table.view());
+    b.output(b.last_row(b.attention(x, x, x, b.kv_cache(6, 2, 8), 2, 0.5f)));
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+    session s{*g};
+    const std::uint32_t ok[4] = {1, 2, 3, 4};
+    const std::uint32_t bad[3] = {1, 10, 2};  // 10 is past the table
+    const std::uint32_t five[5] = {};
+    CHECK_FALSE(s.run(batch{std::span<const std::uint32_t>{}, 0}));  // empty
+    CHECK_FALSE(s.run(batch{five, 0}));                              // more than max_batch
+    CHECK_FALSE(s.run(batch{bad, 0}));                               // one bad token rejects the run
+    CHECK(s.run(batch{ok, 0}));
+    CHECK(s.run(batch{std::span<const std::uint32_t>(ok, 2), 4}));        // positions 4, 5
+    CHECK_FALSE(s.run(batch{std::span<const std::uint32_t>(ok, 2), 5}));  // 5 + 2 > 6
 }

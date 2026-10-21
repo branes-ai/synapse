@@ -55,6 +55,37 @@ constexpr std::size_t wide_offset(std::size_t cols) noexcept {
     return (blocks + alignof(std::int16_t) - 1) / alignof(std::int16_t) * alignof(std::int16_t);
 }
 
+/// Quantize x into the activation format A in scratch (the blocks, then
+/// their quants widened to int16), or use x itself for float activations.
+///   Pre: scratch holds gemv_scratch_bytes for x.size() columns, aligned to
+///   gemv_scratch_alignment.
+template <typename A>
+activations<A> prepare_activations(std::span<const float> x, std::span<std::byte> scratch) noexcept {
+    if constexpr (std::is_same_v<A, float>) {
+        return {x.data()};
+    } else {
+        // Create the activation blocks and the widened quants in the scratch
+        // storage, then fill them: once per activation row, shared by every
+        // weight row.
+        constexpr std::size_t qk = activation_block_size<A>();
+        const std::size_t nb = x.size() / qk;
+        A* blocks = ::new (static_cast<void*>(scratch.data())) A[nb];
+        if constexpr (std::is_same_v<A, quant::block_q8_0>) {
+            quant::quantize_row_q8_0(x, std::span<A>(blocks, nb));
+        } else {
+            quant::quantize_row_q8_k(x, std::span<A>(blocks, nb));
+        }
+        std::int16_t* wide =
+            ::new (static_cast<void*>(scratch.data() + wide_offset<A>(x.size()))) std::int16_t[x.size()];
+        for (std::size_t i = 0; i < nb; ++i) {
+            for (std::size_t j = 0; j < qk; ++j) {
+                wide[i * qk + j] = blocks[i].qs[j];
+            }
+        }
+        return {blocks, wide};
+    }
+}
+
 }  // namespace detail
 
 /// Scratch bytes gemv needs for a matrix of scheme S with `cols` columns:
@@ -88,33 +119,9 @@ void gemv(const quantized_matrix_view<S>& w,
     assert(scratch.size() >= gemv_scratch_bytes<S>(w.cols()));                               // Pre
     assert(reinterpret_cast<std::uintptr_t>(scratch.data()) % gemv_scratch_alignment == 0);  // Pre
 
-    using A = typename S::vec_dot_block;
-    if constexpr (std::is_same_v<A, float>) {
-        for (std::size_t r = 0; r < w.rows(); ++r) {
-            y[r] = row_dot<S>(w.row_bytes(r).data(), activations<float>{x.data()}, w.cols());
-        }
-    } else {
-        // Create the activation blocks and the widened quants in the scratch
-        // storage, then fill them: once per gemv, shared by every row.
-        constexpr std::size_t qk = detail::activation_block_size<A>();
-        const std::size_t nb = w.cols() / qk;
-        A* blocks = ::new (static_cast<void*>(scratch.data())) A[nb];
-        if constexpr (std::is_same_v<A, quant::block_q8_0>) {
-            quant::quantize_row_q8_0(x, std::span<A>(blocks, nb));
-        } else {
-            quant::quantize_row_q8_k(x, std::span<A>(blocks, nb));
-        }
-        std::int16_t* wide =
-            ::new (static_cast<void*>(scratch.data() + detail::wide_offset<A>(w.cols()))) std::int16_t[w.cols()];
-        for (std::size_t i = 0; i < nb; ++i) {
-            for (std::size_t j = 0; j < qk; ++j) {
-                wide[i * qk + j] = blocks[i].qs[j];
-            }
-        }
-        const activations<A> act{blocks, wide};
-        for (std::size_t r = 0; r < w.rows(); ++r) {
-            y[r] = row_dot<S>(w.row_bytes(r).data(), act, w.blocks_per_row());
-        }
+    const auto act = detail::prepare_activations<typename S::vec_dot_block>(x, scratch);
+    for (std::size_t r = 0; r < w.rows(); ++r) {
+        y[r] = row_dot<S>(w.row_bytes(r).data(), act, w.blocks_per_row());
     }
 }
 
