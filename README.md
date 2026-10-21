@@ -126,7 +126,7 @@ auto logits = model.forward(input_tokens);
 2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
 3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels. Matrix-matrix products and register-level tuning to follow.)*
 4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution. *(Done for the decode path: `graph/`. Batched prefill follows with `gemm`.)*
-5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`.
+5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`. *(Done for Llama decode: `models/llama.hpp`, RoPE and grouped-query attention over an F16 KV cache in `kernels/attention.hpp`, and `tools/llama_decode`. Logits are checked against llama.cpp on llama.cpp-generated fixtures and, opt-in, on Llama-3.2-1B Q4_K_M. Batched prefill (`gemm`) and a tokenizer follow.)*
 
 ## Building and testing
 
@@ -165,7 +165,7 @@ FetchContent_MakeAvailable(synapse)
 target_link_libraries(my_target PRIVATE branes::synapse)
 ```
 
-Tests and benchmarks are only built when synapse is the top-level project, so consumers fetch MTL5 and nothing else.
+Tests, benchmarks, and tools are only built when synapse is the top-level project, so consumers fetch MTL5 and nothing else.
 
 ### Adding tests
 
@@ -187,7 +187,7 @@ synapse/
 ├── scripts/      # developer and CI helper scripts, golden-fixture generators
 ├── sdk/          # the header-only library: sdk/include/branes/synapse/
 ├── tests/        # Catch2 regression tests, one executable per file; data/ holds golden fixtures
-└── tools/        # host-side developer tools (model inspection, logit diffing)
+└── tools/        # host-side tools and reference applications (llama_decode)
 ```
 
 ## Status
@@ -274,6 +274,26 @@ s.run();                                           // no allocation, no throw
 ```
 
 Tensors whose lifetimes don't overlap share memory. Four Llama-3.2-1B-width feed-forward blocks run in a 112 KiB arena, against 767 KiB without aliasing, and the arena stays that size however many blocks are added.
+
+A whole Llama-architecture model is built from its GGUF metadata into one such graph, with a KV cache per layer that the session allocates beside the arena. Each run decodes one token at one position:
+
+```cpp
+#include <branes/synapse/models/llama.hpp>
+
+auto model = models::load_llama(file, max_ctx);    // result<llama_model, model_error>; validates every key and shape
+graph::session s{model->graph};                    // arena + KV cache: the only allocations
+for (std::uint32_t pos = 0; pos < tokens.size(); ++pos) {
+    s.run({tokens[pos], pos});                     // embed, 16 x (attention + FFN), logits
+}
+std::span<float> logits = s.tensor(model->logits);
+```
+
+Llama-3.2-1B Q4_K_M decodes in a 515 KiB arena. Its logits agree with llama.cpp's to ~1e-7 until the first 8-bit activation rounding that falls differently, then to a few percent, the same distance synapse moves from itself under a comparable perturbation. llama.cpp's top token is synapse's top token at every position of the test prompt. On an all-F32 model, where no activation is quantized, the two agree to 2e-7 at every position. `tools/llama_decode` runs greedy generation:
+
+```text
+$ llama_decode Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 24 128000 791 6864 315 9822 374
+<|begin_of_text|>The capital of France is Paris. The Eiffel Tower is a famous landmark in Paris. The Eiffel Tower is a symbol of France
+```
 
 ## License
 

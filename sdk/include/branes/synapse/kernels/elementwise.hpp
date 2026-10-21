@@ -3,7 +3,7 @@
 /// @brief The vector operations of a transformer decode step, besides matmul.
 ///
 /// All kernels take float spans, never allocate, and never throw. Outputs may
-/// not alias inputs (the memory planner guarantees this). Numerics follow
+/// not alias inputs (the memory planner guarantees this), except where noted. Numerics follow
 /// ggml's CPU ops: rms_norm accumulates the sum of squares in double, and
 /// softmax subtracts the maximum before exponentiating.
 
@@ -43,7 +43,7 @@ inline void silu(std::span<const float> x, std::span<float> out) noexcept {
     }
 }
 
-/// out = softmax(x).  Pre: equal, non-zero sizes.
+/// out = softmax(x).  Pre: equal, non-zero sizes.  May run in place (out == x).
 inline void softmax(std::span<const float> x, std::span<float> out) noexcept {
     assert(x.size() == out.size() && !x.empty());  // Pre
     const float max = *std::max_element(x.begin(), x.end());

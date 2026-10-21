@@ -166,7 +166,7 @@ TEST_CASE("graph_session: arena execution equals unaliased op-by-op execution bi
 
     session s{dg.g};
     std::copy(x.begin(), x.end(), s.tensor(dg.x).begin());
-    s.run();
+    REQUIRE(s.run());
 
     // Op by op, every tensor in its own buffer, same kernels.
     std::vector<float> h(d), act(ff), silu_gate(ff), residual(d), h2(d), probs(vocab);
@@ -195,7 +195,7 @@ TEST_CASE("graph_session: computes the intended math (double-precision reference
     const auto xf = input_vector();
     session s{dg.g};
     std::copy(xf.begin(), xf.end(), s.tensor(dg.x).begin());
-    s.run();
+    REQUIRE(s.run());
 
     const std::vector<double> x(xf.begin(), xf.end());
     const auto h = rms_norm_ref(x, w.g1.view());
@@ -243,12 +243,49 @@ TEST_CASE("graph_session: runs are repeatable with fresh inputs", "[graph][sessi
     session s{dg.g};
 
     std::copy(x.begin(), x.end(), s.tensor(dg.x).begin());
-    s.run();
+    REQUIRE(s.run());
     const std::vector<float> first(s.tensor(dg.probs).begin(), s.tensor(dg.probs).end());
 
     // The planner may reuse the input's memory during a run, so inputs are
     // rewritten before each run.
     std::copy(x.begin(), x.end(), s.tensor(dg.x).begin());
-    s.run();
+    REQUIRE(s.run());
     CHECK(bit_equal(s.tensor(dg.probs), first));
+}
+
+TEST_CASE("graph_session: runs check the step against the graph's limits", "[graph][session]") {
+    std::mt19937 rng(3);
+    const random_matrix<tensor_type::f32> table(10, 16, rng, -1.0f, 1.0f);
+    graph_builder b;
+    const tensor_id x = b.embed(table.view());
+    const tensor_id a = b.attention(x, x, x, b.kv_cache(4, 2, 8), 2, 0.5f);
+    b.output(a);
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+    session s{*g};
+    CHECK(s.state_bytes() == 2 * 4 * 16 * sizeof(std::uint16_t));
+
+    CHECK(s.run({9, 3}));
+    CHECK_FALSE(s.run({10, 0}));  // token past the embedding table
+    CHECK_FALSE(s.run({0, 4}));   // position past the KV cache
+
+    // A sequence decodes the same after reset() as on a fresh session.
+    const auto decode = [&] {
+        std::vector<float> last;
+        for (std::uint32_t pos = 0; pos < 4; ++pos) {
+            REQUIRE(s.run({pos * 2, pos}));
+        }
+        const auto out = s.tensor(a);
+        return std::vector<float>(out.begin(), out.end());
+    };
+    const auto first = decode();
+    s.reset();
+    CHECK(bit_equal(decode(), first));
+    // The embedding really is row `token`: at position 0 attention returns V.
+    REQUIRE(s.run({7, 0}));
+    std::vector<float> row(16);
+    table.view().dequantize_row(7, row);
+    for (std::size_t i = 0; i < 16; ++i) {
+        CHECK(s.tensor(a)[i] == fp16_to_float(float_to_fp16(row[i])));
+    }
 }

@@ -23,11 +23,12 @@ if(MSVC)
     add_compile_options(/Zc:preprocessor /utf-8)
 endif()
 
-# Tests and benchmarks are built by default only when synapse is the top-level
-# project, so consumers pulling it in via FetchContent get just the
+# Tests, benchmarks and tools are built by default only when synapse is the
+# top-level project, so consumers pulling it in via FetchContent get just the
 # header-only branes::synapse target (and MTL5, its math engine).
 option(SYNAPSE_BUILD_TESTS "Build the tests/ regression suite" ${PROJECT_IS_TOP_LEVEL})
 option(SYNAPSE_BUILD_BENCH "Build the bench/ micro-benchmarks" ${PROJECT_IS_TOP_LEVEL})
+option(SYNAPSE_BUILD_TOOLS "Build the tools/ developer tools and reference applications" ${PROJECT_IS_TOP_LEVEL})
 
 if(SYNAPSE_BUILD_TESTS)
     include(CTest)
@@ -42,6 +43,10 @@ add_subdirectory(sdk)
 
 if(SYNAPSE_BUILD_BENCH)
     add_subdirectory(bench)
+endif()
+
+if(SYNAPSE_BUILD_TOOLS)
+    add_subdirectory(tools)
 endif()
 
 if(SYNAPSE_BUILD_TESTS AND BUILD_TESTING)
