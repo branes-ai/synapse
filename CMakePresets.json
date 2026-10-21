@@ -61,11 +61,11 @@
       "name": "gcc-release-hwy",
       "inherits": "linux",
       "displayName": "GCC Release + Highway AVX2 (host)",
-      "description": "Optimized GCC build with MTL5's Highway SIMD backend, targeting x86-64-v3 (AVX2/FMA). Exercises the vectorized integer dot products in the fused kernels.",
+      "description": "Optimized GCC build with MTL5's Highway SIMD backend at AVX2: x86-64-v3 plus AES and PCLMUL, which Highway requires before it selects its AVX2 target (without them it falls back to SSSE3). Exercises the vectorized integer dot products in the fused kernels.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CXX_COMPILER": "g++",
-        "CMAKE_CXX_FLAGS": "-march=x86-64-v3",
+        "CMAKE_CXX_FLAGS": "-march=x86-64-v3 -maes -mpclmul",
         "SYNAPSE_WITH_HIGHWAY": "ON"
       }
     },

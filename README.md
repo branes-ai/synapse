@@ -147,7 +147,7 @@ Dependencies are pinned in [`cmake/deps.cmake`](cmake/deps.cmake) and resolved t
 | [Catch2](https://github.com/catchorg/Catch2) v3 | Test framework | Tests only |
 | [Highway](https://github.com/google/highway) | SIMD backend for MTL5's kernels (Apache-2.0 / BSD-3) | Opt-in: `-DSYNAPSE_WITH_HIGHWAY=ON` |
 
-Highway selects its instruction set at compile time, so pair it with ISA flags: the `gcc-release-hwy` preset uses `-march=x86-64-v3` (AVX2). Without Highway the kernels use MTL5's portable scalar path.
+Highway selects its instruction set at compile time, so pair it with ISA flags: the `gcc-release-hwy` preset uses `-march=x86-64-v3 -maes -mpclmul` (AVX2; Highway's AVX2 target also requires AES and PCLMUL, and falls back to SSSE3 without them). Without Highway the kernels use MTL5's portable scalar path.
 
 To develop against local checkouts of the Stillwater sister projects (no network):
 
@@ -235,10 +235,12 @@ Fused kernels compute `y = W x` without expanding the weights. `x` is quantized 
 ```cpp
 #include <branes/synapse/kernels/gemv.hpp>
 
+// At load time: size the scratch once, for the widest matrix the model uses.
+std::vector<std::byte> scratch(max_gemv_scratch_bytes);
+
+// Per inference: no allocation.
 visit_matrix(*model, *wq, [&](const auto& w) {
-    using S = typename std::decay_t<decltype(w)>::scheme_type;
-    std::vector<std::byte> scratch(kernels::gemv_scratch_bytes<S>(w.cols()));  // planned once
-    kernels::gemv(w, x, y, scratch);                                           // no allocation
+    kernels::gemv(w, x, y, scratch);  // needs gemv_scratch_bytes<scheme>(w.cols()) bytes
 });
 ```
 

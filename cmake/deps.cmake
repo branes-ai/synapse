@@ -109,8 +109,10 @@ endif()
 # scalar unless MTL5's Highway backend is on. SYNAPSE_WITH_HIGHWAY fetches
 # Highway (Apache-2.0 / BSD-3-Clause) at the tag MTL5 pins and enables it on the
 # MTL5::mtl5 target. Highway dispatches statically, so it uses the ISA the
-# compiler targets: pair it with flags such as -march=x86-64-v3 (AVX2) or
-# -march=native, or it compiles for the baseline ISA (SSE2 on x86-64).
+# compiler targets: pair it with flags such as -march=native, or
+# -march=x86-64-v3 -maes -mpclmul for AVX2 (Highway's AVX2 target also needs
+# AES and PCLMUL, which x86-64-v3 lacks; without them it selects SSSE3).
+# Without ISA flags it compiles for the baseline (SSE2 on x86-64).
 option(SYNAPSE_WITH_HIGHWAY "Enable MTL5's Highway SIMD backend for the kernels" OFF)
 if(SYNAPSE_WITH_HIGHWAY)
     if(NOT TARGET mtl5)

@@ -44,8 +44,9 @@ jobs:
 
   # Dual-compiler validation on Linux: GCC and Clang, Debug (contract asserts
   # live) and Release (optimized, asserts compiled out), plus one Release build
-  # with MTL5's Highway SIMD backend at AVX2 so the vectorized kernels are
-  # tested alongside the scalar ones.
+  # with MTL5's Highway SIMD backend at AVX2 (see the gcc-release-hwy preset
+  # for the flags Highway needs) so the vectorized kernels are tested
+  # alongside the scalar ones.
   build-and-test-linux:
     name: Build and Test (Linux - ${{ matrix.preset }})
     runs-on: ubuntu-24.04
