@@ -5,8 +5,8 @@
 // is also an end-to-end test of the loader.
 //
 // The comparison is bit-exact: the dequantizers follow ggml's order of float
-// operations. A platform that fuses multiply-adds (-ffp-contract=fast with FMA
-// hardware) could differ in the last bit of the K-quant results.
+// operations, and tests/CMakeLists.txt builds the tests with -ffp-contract=off
+// so FMA targets cannot fuse those operations and change the last bit.
 
 #include <branes/synapse/gguf/mapped_file.hpp>
 #include <branes/synapse/gguf/reader.hpp>
