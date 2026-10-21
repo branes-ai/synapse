@@ -7,6 +7,12 @@
 /// quantized_matrix_views (zero-copy views into the model file), so the
 /// executor never switches on a storage format.
 ///
+/// State that outlives a run (the KV cache) is not a tensor either: a graph
+/// declares it as a state, the session allocates it apart from the arena, and
+/// the planner never sees it. Operations that depend on the step being
+/// decoded (embed reads its token; rope and attention read its position) get
+/// it from the session at run time.
+///
 /// Model
 /// -----
 ///   tensor_desc
@@ -14,12 +20,18 @@
 ///     size  : size_t — float elements (0 for kernel scratch)
 ///     role  : input | intermediate | output | scratch
 ///
-///   node = std::variant<op_matmul, op_add, op_mul, op_silu, op_softmax, op_rms_norm>
+///   state_desc — a KV cache layer: max_ctx rows of n_kv_heads * head_dim
+///     F16 keys and as many values
+///
+///   node = std::variant<op_matmul, op_add, op_mul, op_silu, op_softmax,
+///                       op_rms_norm, op_embed, op_rope, op_attention>
 ///     each op names its operand and result tensors by tensor_id; op_matmul
-///     also names a scratch tensor for the gemv activation buffers
+///     and op_attention also name a scratch tensor, and op_attention the
+///     state it reads and appends to
 ///
 ///   compute_graph
 ///     tensors_ : vector<tensor_desc>
+///     states_  : vector<state_desc>
 ///     nodes_   : vector<node>
 ///     inputs_  : vector<tensor_id>,  outputs_ : vector<tensor_id>
 ///
@@ -36,18 +48,28 @@
 ///                                                   — constrains outputs_
 ///   I5: the sum of all tensor sizes, each rounded up to plan_alignment, is
 ///       at most max_graph_bytes (sizes come from untrusted metadata; this
-///       keeps every byte count and arena offset free of overflow)
-///                                                   — constrains tensors_
+///       keeps every byte count and arena offset free of overflow); the
+///       same bound holds for the sum of all state bytes
+///                                                   — constrains tensors_, states_
+///   I6: every head layout fits its operation: tensor sizes are whole heads,
+///       head_dim is even (rope) and at most kernels::max_head_dim
+///       (attention), and the query heads divide evenly among the KV heads
+///                                                   — constrains nodes_, states_
+///   I7: every state is read and written by at most one attention node
+///                                                   — constrains nodes_, states_
 ///
 /// The builder is no-throw on bad input: graphs are built from model
 /// metadata (untrusted), so it records the first error and finalize()
 /// returns it, with the node index where it occurred.
 
+#include <branes/synapse/kernels/attention.hpp>
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/quant/scheme.hpp>
 #include <branes/synapse/result.hpp>
 #include <branes/synapse/tensor/quantized_view.hpp>
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -77,6 +99,10 @@ inline constexpr std::size_t max_graph_bytes = std::numeric_limits<std::size_t>:
 /// The id the builder returns after an error; operations on it are no-ops.
 inline constexpr tensor_id invalid_tensor = std::numeric_limits<tensor_id>::max();
 
+/// Index of a state (a KV cache layer) in its graph.
+using state_id = std::uint32_t;
+inline constexpr state_id invalid_state = std::numeric_limits<state_id>::max();
+
 /// A weight matrix in any format synapse can compute with.
 using matrix_ref = std::variant<quantized_matrix_view<quant::scheme<tensor_type::f32>>,
                                 quantized_matrix_view<quant::scheme<tensor_type::f16>>,
@@ -99,6 +125,14 @@ struct tensor_desc {
     std::size_t bytes = 0;
     std::size_t size = 0;  ///< float elements; 0 for scratch
     tensor_role role = tensor_role::intermediate;
+};
+
+/// A KV cache layer, allocated by the session and kept across runs.
+struct state_desc {
+    std::size_t bytes = 0;  ///< 2 * max_ctx * n_kv_heads * head_dim halves
+    std::size_t max_ctx = 0;
+    std::size_t n_kv_heads = 0;
+    std::size_t head_dim = 0;
 };
 
 struct op_matmul {  ///< out = w * in (gemv)
@@ -124,7 +158,24 @@ struct op_rms_norm {  ///< out = in / rms(in) * gamma
     tensor_id out;
 };
 
-using node = std::variant<op_matmul, op_add, op_mul, op_silu, op_softmax, op_rms_norm>;
+struct op_embed {  ///< out = row `token` of table (the step's token)
+    matrix_ref table;
+    tensor_id out;
+};
+struct op_rope {  ///< out = in with each head rotated by the step's position
+    tensor_id in, out;
+    std::size_t head_dim;
+    float theta_scale;                ///< base^(-2 / head_dim)
+    std::vector<float> freq_factors;  ///< empty, or head_dim / 2 divisors of theta
+};
+struct op_attention {  ///< append (k, v) to cache; out = causal attention of q over it
+    tensor_id q, k, v, out, scratch;
+    state_id cache;
+    std::size_t n_heads;
+    float scale;
+};
+
+using node = std::variant<op_matmul, op_add, op_mul, op_silu, op_softmax, op_rms_norm, op_embed, op_rope, op_attention>;
 
 /// Operand (read) tensors of a node.
 inline std::vector<tensor_id> operands(const node& n) {
@@ -147,6 +198,15 @@ inline std::vector<tensor_id> operands(const node& n) {
         std::vector<tensor_id> operator()(const op_rms_norm& o) const {
             return {o.in};
         }
+        std::vector<tensor_id> operator()(const op_embed&) const {
+            return {};
+        }
+        std::vector<tensor_id> operator()(const op_rope& o) const {
+            return {o.in};
+        }
+        std::vector<tensor_id> operator()(const op_attention& o) const {
+            return {o.q, o.k, o.v};
+        }
     };
     return std::visit(visitor{}, n);
 }
@@ -155,6 +215,9 @@ inline std::vector<tensor_id> operands(const node& n) {
 inline std::vector<tensor_id> results(const node& n) {
     if (const auto* m = std::get_if<op_matmul>(&n)) {
         return {m->out, m->scratch};
+    }
+    if (const auto* a = std::get_if<op_attention>(&n)) {
+        return {a->out, a->scratch};
     }
     return {std::visit([](const auto& o) { return o.out; }, n)};
 }
@@ -167,6 +230,9 @@ enum class graph_errc : std::uint32_t {
     bad_output,           ///< output is invalid, scratch, or listed twice
     no_outputs,           ///< finalize() on a graph with no outputs
     too_large,            ///< the graph's tensors would exceed max_graph_bytes
+    bad_shape,            ///< a head layout that does not fit its operation (I6)
+    bad_parameter,        ///< a non-finite or non-positive scalar parameter
+    bad_state,            ///< a state that is not in the graph, or already in use (I7)
 };
 
 constexpr std::string_view to_string(graph_errc code) noexcept {
@@ -183,6 +249,12 @@ constexpr std::string_view to_string(graph_errc code) noexcept {
         return "graph has no outputs";
     case graph_errc::too_large:
         return "graph tensors too large";
+    case graph_errc::bad_shape:
+        return "head layout does not fit the operation";
+    case graph_errc::bad_parameter:
+        return "invalid scalar parameter";
+    case graph_errc::bad_state:
+        return "invalid or reused state";
     }
     return "unknown error";
 }
@@ -194,11 +266,14 @@ struct graph_error {
 
 class graph_builder;
 
-/// An immutable, validated compute graph (I1-I4).
+/// An immutable, validated compute graph (I1-I7).
 class compute_graph {
 public:
     std::span<const tensor_desc> tensors() const noexcept {
         return tensors_;
+    }
+    std::span<const state_desc> states() const noexcept {
+        return states_;
     }
     std::span<const node> nodes() const noexcept {
         return nodes_;
@@ -209,12 +284,25 @@ public:
     std::span<const tensor_id> outputs() const noexcept {
         return outputs_;
     }
+    /// Tokens a run accepts are < token_limit(): the smallest embedding
+    /// table's row count (unbounded if the graph embeds nothing).
+    std::size_t token_limit() const noexcept {
+        return token_limit_;
+    }
+    /// Positions a run accepts are < position_limit(): the smallest KV cache's
+    /// max_ctx (unbounded if the graph has no attention).
+    std::size_t position_limit() const noexcept {
+        return position_limit_;
+    }
 
 private:
     friend class graph_builder;
     compute_graph() = default;
 
     std::vector<tensor_desc> tensors_;
+    std::vector<state_desc> states_;
+    std::size_t token_limit_ = std::numeric_limits<std::size_t>::max();
+    std::size_t position_limit_ = std::numeric_limits<std::size_t>::max();
     std::vector<node> nodes_;
     std::vector<tensor_id> inputs_;
     std::vector<tensor_id> outputs_;
@@ -303,6 +391,117 @@ public:
         return out;
     }
 
+    /// Row `token` of table, for the token of each run.  Pre (checked): table non-empty.
+    tensor_id embed(const matrix_ref& table) {
+        if (failed()) {
+            return invalid_tensor;
+        }
+        if (rows(table) == 0 || cols(table) == 0) {
+            return fail(graph_errc::empty_tensor);
+        }
+        const tensor_id out = add_floats(cols(table), tensor_role::intermediate);
+        if (out != invalid_tensor) {
+            g_.token_limit_ = std::min(g_.token_limit_, rows(table));
+            g_.nodes_.emplace_back(op_embed{table, out});
+        }
+        return out;
+    }
+
+    /// x, viewed as heads of head_dim floats, each rotated by the run's
+    /// position with theta_i = pos * base^(-2i / head_dim) / freq_factors[i].
+    ///   Pre (checked): I6 (head_dim even, x.size a multiple of it); base and
+    ///   every freq factor finite and positive; freq_factors empty or of size
+    ///   head_dim / 2.
+    tensor_id rope(tensor_id x, std::size_t head_dim, float base, std::span<const float> freq_factors = {}) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        if (head_dim == 0 || head_dim % 2 != 0 || size_of(x) % head_dim != 0 ||
+            (!freq_factors.empty() && freq_factors.size() != head_dim / 2)) {
+            return fail(graph_errc::bad_shape);  // I6
+        }
+        const auto positive = [](float f) { return std::isfinite(f) && f > 0.0f; };
+        if (!positive(base) || !std::all_of(freq_factors.begin(), freq_factors.end(), positive)) {
+            return fail(graph_errc::bad_parameter);
+        }
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate);
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_rope{x,
+                                           out,
+                                           head_dim,
+                                           kernels::rope_theta_scale(base, head_dim),
+                                           std::vector<float>(freq_factors.begin(), freq_factors.end())});
+        }
+        return out;
+    }
+
+    /// A KV cache layer of max_ctx positions.
+    ///   Pre (checked): all sizes non-zero, head_dim <= kernels::max_head_dim
+    ///   (I6), max_ctx representable as a position, and the bytes within I5.
+    state_id kv_cache(std::size_t max_ctx, std::size_t n_kv_heads, std::size_t head_dim) {
+        if (failed()) {
+            return invalid_state;
+        }
+        if (max_ctx == 0 || n_kv_heads == 0 || head_dim == 0 || head_dim > kernels::max_head_dim ||
+            max_ctx > std::size_t{std::numeric_limits<std::uint32_t>::max()} + 1) {
+            fail(graph_errc::bad_shape);
+            return invalid_state;
+        }
+        // I5: 2 (K and V) * max_ctx * n_kv_heads * head_dim halves, unwrapped.
+        constexpr std::size_t half = sizeof(std::uint16_t);
+        const std::size_t limit = max_graph_bytes - state_bytes_;
+        if (n_kv_heads > limit / head_dim || max_ctx > limit / (n_kv_heads * head_dim) / (2 * half)) {
+            fail(graph_errc::too_large);
+            return invalid_state;
+        }
+        const std::size_t bytes = 2 * half * max_ctx * n_kv_heads * head_dim;
+        state_bytes_ += bytes;
+        g_.states_.push_back(state_desc{bytes, max_ctx, n_kv_heads, head_dim});
+        state_used_.push_back(false);
+        return static_cast<state_id>(g_.states_.size() - 1);
+    }
+
+    /// Append (k, v) to cache at the run's position, then attend q, as
+    /// n_heads query heads, to every cached position up to it.
+    ///   Pre (checked): cache is a state of this graph not used by another
+    ///   attention (I7); q.size == n_heads * head_dim, k.size == v.size ==
+    ///   n_kv_heads * head_dim, n_heads a multiple of n_kv_heads (I6); scale
+    ///   finite and positive.
+    tensor_id attention(tensor_id q, tensor_id k, tensor_id v, state_id cache, std::size_t n_heads, float scale) {
+        if (!operand_ok(q) || !operand_ok(k) || !operand_ok(v)) {
+            return invalid_tensor;
+        }
+        if (cache >= g_.states_.size() || state_used_[cache]) {
+            return fail(graph_errc::bad_state);  // I7
+        }
+        const state_desc& c = g_.states_[cache];
+        const std::size_t row = c.n_kv_heads * c.head_dim;
+        if (n_heads == 0 || n_heads % c.n_kv_heads != 0 || n_heads > max_graph_bytes / c.head_dim ||
+            size_of(q) != n_heads * c.head_dim || size_of(k) != row || size_of(v) != row) {
+            return fail(graph_errc::bad_shape);  // I6
+        }
+        if (!std::isfinite(scale) || scale <= 0.0f) {
+            return fail(graph_errc::bad_parameter);
+        }
+        // attention_scratch_floats = n_heads / n_kv_heads * (max_ctx + head_dim), unwrapped.
+        const std::size_t group = n_heads / c.n_kv_heads;
+        const std::size_t per_head = c.max_ctx + c.head_dim;  // both bounded by kv_cache
+        if (per_head > max_graph_bytes / sizeof(float) / group) {
+            return fail(graph_errc::too_large);
+        }
+        const std::size_t scratch_floats =
+            kernels::attention_scratch_floats(n_heads, c.n_kv_heads, c.head_dim, c.max_ctx);
+        const tensor_id out = add_floats(size_of(q), tensor_role::intermediate);
+        const tensor_id scratch = add_tensor(scratch_floats * sizeof(float), 0, tensor_role::scratch);
+        if (out == invalid_tensor || scratch == invalid_tensor) {
+            return invalid_tensor;
+        }
+        state_used_[cache] = true;
+        g_.position_limit_ = std::min(g_.position_limit_, c.max_ctx);
+        g_.nodes_.emplace_back(op_attention{q, k, v, out, scratch, cache, n_heads, scale});
+        return out;
+    }
+
     /// Mark t as a graph output: its value is kept until the end of a run.
     void output(tensor_id t) {
         if (failed()) {
@@ -319,7 +518,7 @@ public:
         g_.outputs_.push_back(t);
     }
 
-    /// The graph, or the first error.  Post: on success, I1-I4 hold.
+    /// The graph, or the first error.  Post: on success, I1-I7 hold.
     result<compute_graph, graph_error> finalize() && {
         if (error_) {
             return *error_;
@@ -410,7 +609,9 @@ private:
 
     compute_graph g_;
     std::optional<graph_error> error_;
-    std::size_t total_bytes_ = 0;  ///< sum of aligned tensor bytes (I5)
+    std::size_t total_bytes_ = 0;   ///< sum of aligned tensor bytes (I5)
+    std::size_t state_bytes_ = 0;   ///< sum of state bytes (I5)
+    std::vector<bool> state_used_;  ///< by an attention node (I7)
 };
 
 #if defined(SYNAPSE_GCC_STRINGOP_WORKAROUND)
