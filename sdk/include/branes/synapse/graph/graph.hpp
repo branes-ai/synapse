@@ -535,10 +535,10 @@ public:
         if (!std::isfinite(scale) || scale <= 0.0f) {
             return fail(graph_errc::bad_parameter);
         }
-        // attention_scratch_floats = n_heads / n_kv_heads * (max_ctx + head_dim), unwrapped.
-        const std::size_t group = n_heads / c.n_kv_heads;
+        // attention_scratch_floats = n_heads * (max_ctx + head_dim) (one slot
+        // per KV group), unwrapped.
         const std::size_t per_head = c.max_ctx + c.head_dim;  // both bounded by kv_cache
-        if (per_head > max_graph_bytes / sizeof(float) / group) {
+        if (per_head > max_graph_bytes / sizeof(float) / n_heads) {
             return fail(graph_errc::too_large);
         }
         const std::size_t scratch_floats =

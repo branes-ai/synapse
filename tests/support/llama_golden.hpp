@@ -122,15 +122,17 @@ inline std::unique_ptr<golden_files> open_golden(const std::filesystem::path& mo
 
 /// Decodes `tokens` in runs of the given sizes (which must sum to
 /// tokens.size()) through a graph built for max_batch tokens per run, and
-/// returns the logits after each run, i.e. for the last token of each chunk.
+/// returns the logits after each run, i.e. for the last token of each chunk,
+/// using `threads` threads of MTL5's pool.
 inline std::vector<std::vector<float>> decode_in_chunks(const branes::synapse::gguf::gguf_file& file,
                                                         const std::vector<std::uint32_t>& tokens,
                                                         const std::vector<std::size_t>& chunks,
-                                                        std::size_t max_batch) {
+                                                        std::size_t max_batch,
+                                                        unsigned threads = 1) {
     using namespace branes::synapse;
     auto model = models::load_llama(file, tokens.size(), max_batch);
     REQUIRE(model);
-    graph::session s{model->graph};
+    graph::session s{model->graph, threads};
     std::vector<std::vector<float>> out;
     std::size_t pos = 0;
     for (std::size_t n : chunks) {

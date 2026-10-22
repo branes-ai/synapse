@@ -44,6 +44,8 @@
 #include <branes/synapse/kernels/elementwise.hpp>
 #include <branes/synapse/kernels/gemm.hpp>
 
+#include <mtl/detail/thread_pool.hpp>
+
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -75,14 +77,19 @@ struct batch {
 class session {
 public:
     /// Plans g and allocates the arena and the states.  Post: S1, S2, S3.
-    explicit session(const compute_graph& g)
+    ///
+    /// threads: how many of MTL5's process-wide pool threads a run may use
+    /// (the pool's size is MTL5_NUM_THREADS, read once). 1, the default,
+    /// never touches the pool; 0 means the whole pool. Results do not depend
+    /// on it (D1).
+    explicit session(const compute_graph& g, unsigned threads = 1)
         : graph_(&g), plan_(plan(g)), arena_(allocate(plan_.arena_bytes)), state_offset_(state_offsets(g)),
-          states_(allocate(state_offset_.back())) {
+          states_(allocate(state_offset_.back())), threads_(team_size(threads)) {
         assert(plan_is_valid(g, plan_));  // S1
         reset();
     }
     /// The session keeps a pointer to its graph: a temporary would dangle.
-    session(const compute_graph&&) = delete;
+    session(const compute_graph&&, unsigned = 1) = delete;
 
     session(const session&) = delete;
     session& operator=(const session&) = delete;
@@ -99,6 +106,11 @@ public:
 
     const memory_plan& memory() const noexcept {
         return plan_;
+    }
+
+    /// Threads a run uses (1 to the pool's size).
+    unsigned threads() const noexcept {
+        return threads_;
     }
 
     /// Bytes held by the graph's states (the KV cache).
@@ -192,10 +204,56 @@ private:
         return tensor(t).subspan(i * size, size);
     }
 
+    static unsigned team_size(unsigned requested) {
+        if (requested == 1) {
+            return 1;
+        }
+        const unsigned pool = mtl::detail::thread_pool::instance().size();
+        return requested == 0 ? pool : std::min(requested, pool);
+    }
+
+    /// body(begin, end) over contiguous chunks of [0, n), each at least
+    /// `grain` long, on up to threads_ threads of MTL5's pool (the calling
+    /// thread takes the first chunk). Returns when every chunk is done, which
+    /// orders all of their writes before the caller's next read (P2). The
+    /// chunks only partition the work: each output is produced by one body
+    /// call whatever the split (D1).
+    template <typename Body>
+    void parallel(std::size_t n, std::size_t grain, Body&& body) noexcept {
+        std::size_t team = threads_;
+        if (grain > 0) {
+            team = std::min(team, n / grain);
+        }
+        if (team <= 1) {
+            body(std::size_t{0}, n);
+            return;
+        }
+        const std::size_t chunk = (n + team - 1) / team;
+        mtl::detail::thread_pool::instance().run(static_cast<unsigned>(team), [&](unsigned tid) {
+            const std::size_t begin = std::size_t{tid} * chunk;
+            if (begin < n) {
+                body(begin, std::min(n, begin + chunk));
+            }
+        });
+    }
+
+    /// Weight rows per thread below which splitting a matmul does not pay.
+    static constexpr std::size_t matmul_grain = 16;
+
     void execute(const op_matmul& o) noexcept {
         const std::span<std::byte> scratch = bytes(o.scratch);
         const std::size_t n = rows(o.in);
-        std::visit([&](const auto& w) { kernels::gemm(w, active(o.in), n, active(o.out), scratch); }, o.w);
+        const std::span<float> y = active(o.out);
+        std::visit(
+            [&](const auto& w) {
+                using S = typename std::decay_t<decltype(w)>::scheme_type;
+                // Quantize the activations once, then split the weight rows.
+                const auto* acts = kernels::gemm_prepare<S>(w.cols(), active(o.in), n, scratch);
+                parallel(w.rows(), matmul_grain, [&](std::size_t r0, std::size_t r1) {
+                    kernels::gemm_rows(w, acts, n, y, r0, r1);
+                });
+            },
+            o.w);
     }
     void execute(const op_add& o) noexcept {
         kernels::add(active(o.a), active(o.b), active(o.out));
@@ -230,21 +288,31 @@ private:
         }
     }
     void execute(const op_attention& o) noexcept {
-        // Token by token: token i appends its row, then attends to positions
-        // 0..pos+i, exactly as a run of that token alone would.
+        // Append every token's K and V first: token i reads only rows up to
+        // pos+i, so this is what running the tokens one by one would see.
+        // Then the KV groups, each over all tokens with its own scratch slot.
+        const kernels::kv_layer c = cache(o.cache);
+        const std::size_t n = batch_.tokens.size();
+        for (std::size_t i = 0; i < n; ++i) {
+            kernels::kv_append(row(o.k, i), row(o.v, i), c, position(i));
+        }
         const std::span<std::byte> scratch = bytes(o.scratch);
         const std::span<float> scores{reinterpret_cast<float*>(scratch.data()), scratch.size() / sizeof(float)};
-        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
-            kernels::attention(row(o.q, i),
-                               row(o.k, i),
-                               row(o.v, i),
-                               cache(o.cache),
-                               position(i),
-                               o.n_heads,
-                               o.scale,
-                               row(o.out, i),
-                               scores);
-        }
+        const std::size_t slot = kernels::attention_group_floats(o.n_heads, c.n_kv_heads, c.head_dim, c.max_ctx);
+        parallel(c.n_kv_heads, 1, [&](std::size_t g0, std::size_t g1) {
+            for (std::size_t g = g0; g < g1; ++g) {
+                for (std::size_t i = 0; i < n; ++i) {
+                    kernels::attend_group(row(o.q, i),
+                                          c,
+                                          position(i),
+                                          o.n_heads,
+                                          o.scale,
+                                          row(o.out, i),
+                                          scores.subspan(g * slot, slot),
+                                          g);
+                }
+            }
+        });
     }
     void execute(const op_last_row& o) noexcept {
         const std::span<const float> last = row(o.in, batch_.tokens.size() - 1);
@@ -260,6 +328,7 @@ private:
     arena_ptr arena_;
     std::vector<std::size_t> state_offset_;
     arena_ptr states_;
+    unsigned threads_ = 1;
     batch batch_{};
 };
 

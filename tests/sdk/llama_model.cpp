@@ -14,39 +14,20 @@
 // perturbed against itself, by skipping the F16 rounding of q, moves just as
 // far). A wrong kernel or graph moves them by far more and loses the top token.
 
+#include "../support/env.hpp"
 #include "../support/llama_golden.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstdlib>
 #include <optional>
 #include <string>
 #include <vector>
 
-namespace {
-
-// The environment variable `name`, if set. (MSVC deprecates std::getenv.)
-std::optional<std::string> env(const char* name) {
-#if defined(_MSC_VER)
-    char* value = nullptr;
-    std::size_t len = 0;
-    if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
-        return std::nullopt;
-    }
-    std::string s(value);
-    std::free(value);
-    return s;
-#else
-    const char* value = std::getenv(name);
-    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
-#endif
-}
-
-}  // namespace
+using synapse_test::get_env;
 
 TEST_CASE("llama_model: decode logits match llama.cpp on a real model", "[llama][model]") {
-    const auto model = env("SYNAPSE_LLAMA_MODEL");
-    const auto golden = env("SYNAPSE_LLAMA_GOLDEN");
+    const auto model = get_env("SYNAPSE_LLAMA_MODEL");
+    const auto golden = get_env("SYNAPSE_LLAMA_GOLDEN");
     if (!model || !golden) {
         SKIP("set SYNAPSE_LLAMA_MODEL and SYNAPSE_LLAMA_GOLDEN to run");
     }
@@ -67,8 +48,8 @@ TEST_CASE("llama_model: decode logits match llama.cpp on a real model", "[llama]
 
 TEST_CASE("llama_model: prefilling the prompt in one batch equals decoding it token by token",
           "[llama][model][prefill]") {
-    const auto model = env("SYNAPSE_LLAMA_MODEL");
-    const auto golden = env("SYNAPSE_LLAMA_GOLDEN");
+    const auto model = get_env("SYNAPSE_LLAMA_MODEL");
+    const auto golden = get_env("SYNAPSE_LLAMA_GOLDEN");
     if (!model || !golden) {
         SKIP("set SYNAPSE_LLAMA_MODEL and SYNAPSE_LLAMA_GOLDEN to run");
     }

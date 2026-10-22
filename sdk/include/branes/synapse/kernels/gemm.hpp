@@ -21,14 +21,16 @@
 /// compiler for targets without FMA. A consumer that needs G1 on an FMA
 /// target with GCC or Clang compiles with -ffp-contract=off as well.
 ///
-/// gemm never allocates and never throws: the activations, their descriptors
-/// and the per-row accumulators live in caller-provided scratch.
+/// gemm never allocates and never throws: the activations and their
+/// descriptors live in caller-provided scratch, the accumulators on the stack.
+/// gemm_prepare + gemm_rows split it so the rows can be spread over threads.
 
 #include <branes/synapse/kernels/dot.hpp>
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/quant/scheme.hpp>
 #include <branes/synapse/tensor/quantized_view.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
@@ -56,14 +58,83 @@ constexpr std::size_t gemm_row_stride(std::size_t cols) noexcept {
 
 }  // namespace detail
 
+/// Tokens gemm_rows accumulates at once, in a stack array. A batch larger
+/// than this is processed in tiles (each weight block is unpacked once per
+/// tile); the order of every (row, token) accumulation is unchanged.
+inline constexpr std::size_t gemm_token_tile = 64;
+
 /// Scratch bytes gemm needs for n activation rows of `cols` columns: per row,
-/// the quantized activations (as gemv) and their descriptor, plus one float
-/// accumulator per row.
+/// the quantized activations (as gemv) and their descriptor.
 ///   Pre: cols % S::block_size == 0.
 template <quant::Scheme S>
 constexpr std::size_t gemm_scratch_bytes(std::size_t cols, std::size_t n) noexcept {
     using A = typename S::vec_dot_block;
-    return n * detail::gemm_row_stride<S>(cols) + detail::align_scratch(n * sizeof(activations<A>)) + n * sizeof(float);
+    return n * detail::gemm_row_stride<S>(cols) + detail::align_scratch(n * sizeof(activations<A>));
+}
+
+/// Quantize the n activation rows of x into scratch, once for the whole
+/// product, and return their descriptors (which live in scratch).
+///   Pre: as gemm.
+template <quant::Scheme S>
+const activations<typename S::vec_dot_block>*
+gemm_prepare(std::size_t cols, std::span<const float> x, std::size_t n, std::span<std::byte> scratch) noexcept {
+    using A = typename S::vec_dot_block;
+    assert(n >= 1 && x.size() == n * cols);                                                  // Pre
+    assert(scratch.size() >= gemm_scratch_bytes<S>(cols, n));                                // Pre
+    assert(reinterpret_cast<std::uintptr_t>(scratch.data()) % gemm_scratch_alignment == 0);  // Pre
+    const std::size_t stride = detail::gemm_row_stride<S>(cols);
+    auto* const acts = ::new (static_cast<void*>(scratch.data() + n * stride)) activations<A>[n];
+    for (std::size_t t = 0; t < n; ++t) {
+        acts[t] = detail::prepare_activations<A>(x.subspan(t * cols, cols), scratch.subspan(t * stride, stride));
+    }
+    return acts;
+}
+
+/// Output rows [r0, r1) of every token: y[t * w.rows() + r] for r in [r0, r1).
+/// Reads only w and acts and writes only those outputs, so disjoint row
+/// ranges can run on different threads, and the results do not depend on how
+/// the rows are split (D1).
+///   Pre: acts from gemm_prepare for these n rows; r0 <= r1 <= w.rows().
+template <quant::Scheme S>
+void gemm_rows(const quantized_matrix_view<S>& w,
+               const activations<typename S::vec_dot_block>* acts,
+               std::size_t n,
+               std::span<float> y,
+               std::size_t r0,
+               std::size_t r1) noexcept {
+    const std::size_t cols = w.cols();
+    const std::size_t rows = w.rows();
+    assert(r0 <= r1 && r1 <= rows && y.size() == n * rows);  // Pre
+    std::array<float, gemm_token_tile> acc{};
+    for (std::size_t r = r0; r < r1; ++r) {
+        const std::byte* row = w.row_bytes(r).data();
+        for (std::size_t t0 = 0; t0 < n; t0 += gemm_token_tile) {
+            const std::size_t nt = std::min(gemm_token_tile, n - t0);
+            for (std::size_t t = 0; t < nt; ++t) {
+                acc[t] = 0.0f;
+            }
+            if constexpr (S::block_size == 1) {
+                std::array<float, plain_chunk> buf{};
+                for (std::size_t i = 0; i * plain_chunk < cols; ++i) {
+                    const std::size_t len = std::min(plain_chunk, cols - i * plain_chunk);
+                    plain_kernel<S>::unpack(row, i, len, buf.data());
+                    for (std::size_t t = 0; t < nt; ++t) {
+                        acc[t] += plain_kernel<S>::dot(buf.data(), acts[t0 + t].x, i, len);
+                    }
+                }
+            } else {
+                for (std::size_t i = 0; i < w.blocks_per_row(); ++i) {
+                    const auto u = block_kernel<S>::unpack(row, i);
+                    for (std::size_t t = 0; t < nt; ++t) {
+                        acc[t] += block_kernel<S>::dot(u, acts[t0 + t], i);
+                    }
+                }
+            }
+            for (std::size_t t = 0; t < nt; ++t) {
+                y[(t0 + t) * rows + r] = acc[t];
+            }
+        }
+    }
 }
 
 /// Y = X W^T: y[t * w.rows() + r] = row r of w . row t of x.
@@ -78,48 +149,8 @@ void gemm(const quantized_matrix_view<S>& w,
           std::size_t n,
           std::span<float> y,
           std::span<std::byte> scratch) noexcept {
-    using A = typename S::vec_dot_block;
-    const std::size_t cols = w.cols();
-    const std::size_t rows = w.rows();
-    assert(n >= 1 && x.size() == n * cols && y.size() == n * rows);                          // Pre
-    assert(scratch.size() >= gemm_scratch_bytes<S>(cols, n));                                // Pre
-    assert(reinterpret_cast<std::uintptr_t>(scratch.data()) % gemm_scratch_alignment == 0);  // Pre
-
-    const std::size_t stride = detail::gemm_row_stride<S>(cols);
-    std::byte* const act_bytes = scratch.data() + n * stride;
-    auto* const acts = ::new (static_cast<void*>(act_bytes)) activations<A>[n];
-    auto* const acc =
-        ::new (static_cast<void*>(act_bytes + detail::align_scratch(n * sizeof(activations<A>)))) float[n];
-    for (std::size_t t = 0; t < n; ++t) {
-        acts[t] = detail::prepare_activations<A>(x.subspan(t * cols, cols), scratch.subspan(t * stride, stride));
-    }
-
-    for (std::size_t r = 0; r < rows; ++r) {
-        const std::byte* row = w.row_bytes(r).data();
-        for (std::size_t t = 0; t < n; ++t) {
-            acc[t] = 0.0f;
-        }
-        if constexpr (S::block_size == 1) {
-            std::array<float, plain_chunk> buf{};
-            for (std::size_t i = 0; i * plain_chunk < cols; ++i) {
-                const std::size_t len = std::min(plain_chunk, cols - i * plain_chunk);
-                plain_kernel<S>::unpack(row, i, len, buf.data());
-                for (std::size_t t = 0; t < n; ++t) {
-                    acc[t] += plain_kernel<S>::dot(buf.data(), acts[t].x, i, len);
-                }
-            }
-        } else {
-            for (std::size_t i = 0; i < w.blocks_per_row(); ++i) {
-                const auto u = block_kernel<S>::unpack(row, i);
-                for (std::size_t t = 0; t < n; ++t) {
-                    acc[t] += block_kernel<S>::dot(u, acts[t], i);
-                }
-            }
-        }
-        for (std::size_t t = 0; t < n; ++t) {
-            y[t * rows + r] = acc[t];
-        }
-    }
+    assert(y.size() == n * w.rows());  // Pre
+    gemm_rows(w, gemm_prepare<S>(w.cols(), x, n, scratch), n, y, 0, w.rows());
 }
 
 }  // namespace branes::synapse::kernels

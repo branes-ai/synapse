@@ -1,6 +1,6 @@
 // llama_decode — greedy decoding of a Llama-architecture GGUF model.
 //
-//   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>]
+//   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [-t <threads>]
 //                (-p <prompt text> | <token id>...)
 //
 // Tokenizes the prompt (-p, for Llama-3-style BPE vocabularies; special
@@ -10,6 +10,10 @@
 // -n more by taking the most likely next token each step, stopping at the
 // end-of-sequence token. Prints the tokens as text and the prefill and decode
 // rates. Without a prompt it starts from the model's BOS token.
+//
+// -t sets the threads of MTL5's process-wide pool (MTL5_NUM_THREADS); by
+// default MTL5_NUM_THREADS if set, else every hardware thread. The output is
+// the same for any thread count.
 
 #include <branes/synapse/gguf/mapped_file.hpp>
 #include <branes/synapse/gguf/reader.hpp>
@@ -28,6 +32,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using namespace branes::synapse;
@@ -115,9 +120,30 @@ std::optional<std::uint64_t> parse_uint(const char* s, std::uint64_t max) {
     return v;
 }
 
+bool has_env(const char* name) {
+#if defined(_MSC_VER)
+    char* value = nullptr;
+    std::size_t len = 0;
+    const bool set = _dupenv_s(&value, &len, name) == 0 && value != nullptr;
+    std::free(value);
+    return set;
+#else
+    return std::getenv(name) != nullptr;
+#endif
+}
+
+void set_env(const char* name, const char* value) {
+#if defined(_WIN32)
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
 int usage(const char* argv0) {
     std::fprintf(stderr,
-                 "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] (-p <prompt> | <token id>...)\n",
+                 "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [-t <threads>] "
+                 "(-p <prompt> | <token id>...)\n",
                  argv0);
     return 2;
 }
@@ -131,19 +157,20 @@ int main(int argc, char** argv) {
     std::size_t n_new = 32;
     std::size_t n_ctx = 0;
     std::size_t n_batch = 64;
+    std::size_t n_threads = 0;
     std::vector<std::uint32_t> prompt;
     std::optional<std::string> text;
     for (int i = 2; i < argc; ++i) {
         const std::string_view a = argv[i];
         if (a == "-p" && i + 1 < argc) {
             text = argv[++i];
-        } else if ((a == "-n" || a == "-c" || a == "-b") && i + 1 < argc) {
+        } else if ((a == "-n" || a == "-c" || a == "-b" || a == "-t") && i + 1 < argc) {
             // Positions are 32-bit, so neither count can usefully exceed that.
             const auto v = parse_uint(argv[++i], std::numeric_limits<std::uint32_t>::max());
             if (!v) {
                 return usage(argv[0]);
             }
-            (a == "-n" ? n_new : a == "-c" ? n_ctx : n_batch) = static_cast<std::size_t>(*v);
+            (a == "-n" ? n_new : a == "-c" ? n_ctx : a == "-b" ? n_batch : n_threads) = static_cast<std::size_t>(*v);
         } else {
             const auto t = parse_uint(argv[i], std::numeric_limits<std::uint32_t>::max());
             if (!t) {
@@ -206,11 +233,16 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "\n");
         return 1;
     }
+    // MTL5's pool reads MTL5_NUM_THREADS once, when the session first uses it.
+    if (n_threads > 0 || !has_env("MTL5_NUM_THREADS")) {
+        const unsigned t = n_threads > 0 ? static_cast<unsigned>(n_threads) : std::thread::hardware_concurrency();
+        set_env("MTL5_NUM_THREADS", std::to_string(t == 0 ? 1 : t).c_str());
+    }
     const auto& c = model->config;
-    graph::session s{model->graph};
+    graph::session s{model->graph, 0};
     std::fprintf(stderr,
                  "llama: %zu layers, d=%zu, ff=%zu, %zu heads (%zu KV), vocab %zu\n"
-                 "memory: arena %.1f KiB for batches of %zu, KV cache %.1f MiB for %zu positions\n",
+                 "memory: arena %.1f KiB for batches of %zu, KV cache %.1f MiB for %zu positions; %u threads\n",
                  c.n_layer,
                  c.n_embd,
                  c.n_ff,
@@ -220,7 +252,8 @@ int main(int argc, char** argv) {
                  static_cast<double>(s.memory().arena_bytes) / 1024.0,
                  n_batch,
                  static_cast<double>(s.state_bytes()) / (1024.0 * 1024.0),
-                 n_ctx);
+                 n_ctx,
+                 s.threads());
 
     const detokenizer fallback(*parsed);
     const auto show = [&](std::uint32_t t) { return bpe ? bpe->decode(t, true) : fallback.text(t); };
