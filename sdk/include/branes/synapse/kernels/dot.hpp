@@ -3,9 +3,9 @@
 /// @brief Fused dot products of one encoded weight row with quantized activations.
 ///
 /// Each kernel walks a row of weight blocks next to the matching activation
-/// blocks. A block's dot product is computed exactly in int32, then scaled
-/// into a float accumulator once per block, so weights are never expanded to
-/// float. The integer arithmetic follows ggml's ggml_vec_dot_*_q8_*_generic:
+/// blocks. A block's dot product is computed exactly in integers and scaled by
+/// the block's scales, so weights are never expanded to float. The integer
+/// arithmetic follows ggml's ggml_vec_dot_*_q8_*_generic:
 ///
 ///   Q4_0 x Q8_0  sum (q - 8) a
 ///   Q8_0 x Q8_0  sum q a
@@ -13,17 +13,21 @@
 ///                (sub-block sums come from Q8_K's bsums)
 ///   Q6_K x Q8_K  sum_j sc_j dot(q_j - 32, a_j)
 ///
-/// Every block dot is one 16-bit widening dot product through
-/// mtl::simd::reduce_dot_widen, which lowers to vpmaddwd (x86) / SMLAL (NEON)
-/// when MTL5's Highway backend is on and to a scalar loop otherwise. Weights
-/// are unpacked to int16 with their offset (and, for the K formats, their
-/// sub-block scale) folded in, so each 256-weight K block is one dot instead
-/// of 8 or 16 short ones; activations are widened to int16 once per gemv (see
-/// activations<>). No overflow is possible: |w| <= 4096 and |a| <= 127, so a
-/// block sums to at most 256 * 4096 * 127 < 2^31.
+/// Weights are unpacked to int16 with their offset (and, for the K formats,
+/// their sub-block scale) folded in, a chunk of up to chunk_elements weights
+/// at a time; activations are widened to int16 once per product (see
+/// activations<>). Each chunk is one mtl::simd::reduce_dot_block_scaled
+/// (MTL5 >= 5.20): every block's exact integer sum stays in vector lanes and
+/// is scaled in-register by d_w * d_a, with one horizontal reduce per chunk
+/// rather than one per block. No overflow is possible: |w| <= 4096 and
+/// |a| <= 127, so a block sums to at most 256 * 4096 * 127 < 2^28, inside the
+/// primitive's per-block precondition of 2^31.
 ///
-/// The per-block integer sums are exact and so independent of the SIMD path;
-/// only the float accumulation across blocks is order-dependent.
+/// Reproducibility: every block's integer sum is exact, and the float order
+/// is fixed for a given target, so results are deterministic run to run, and
+/// gemv and gemm agree bit for bit (G1). Across SIMD targets they agree to
+/// float re-association (the vector width decides how a block's sum splits
+/// into lanes before conversion).
 
 #include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/blocks.hpp>
@@ -55,7 +59,8 @@ struct activations<quant::block_q8_0> {
 template <>
 struct activations<quant::block_q8_k> {
     const quant::block_q8_k* blocks;
-    const std::int16_t* wide;  ///< 256 per block
+    const std::int16_t* wide;   ///< 256 per block
+    const std::int16_t* bsums;  ///< the blocks' 16 sub-block sums each, contiguous
 };
 
 template <>
@@ -63,13 +68,19 @@ struct activations<float> {
     const float* x;
 };
 
-/// The fused dot of one quantized format, split at the block: unpack() turns
-/// weight block i of a row into its int16 operand and scales, and dot()
-/// returns that block's contribution against one activation row. row_dot
-/// (gemv) and gemm both accumulate dot(unpack(row, i), a, i) over i in block
-/// order, so for any activation row they perform the same float operations
-/// in the same order: gemm's results equal gemv's bit for bit (G1), while
-/// gemm unpacks each weight block once for all its activation rows.
+/// Weights unpacked per chunk: up to this many int16 operands (2 KiB), on the
+/// stack. Measured on AVX2 for Q4_K, Q6_K and Q8_0, gemv and gemm alike: a
+/// chunk this size amortizes the horizontal reduce while one token's chunk of
+/// activations, for a whole token tile, still sits in L1; 2048 is slower for
+/// Q4_K's batched products (0.180 vs 0.133 ms per token at 2048 x 2048).
+inline constexpr std::size_t chunk_elements = 1024;
+
+/// The fused dot of one quantized format, split at the block. unpack() writes
+/// weight block i of a row as its int16 operand and returns its scales;
+/// act_scale() is an activation block's scale. The chunk functions below
+/// build every quantized row dot from them: row_dot (gemv) and gemm make the
+/// same calls in the same order for any activation row, so their results are
+/// bit-identical (G1), while gemm unpacks each chunk once for all its rows.
 template <quant::Scheme S>
 struct block_kernel;
 
@@ -77,24 +88,20 @@ struct block_kernel;
 template <>
 struct block_kernel<quant::scheme<quant::tensor_type::q4_0>> {
     using act = activations<quant::block_q8_0>;
-    struct unpacked {
-        std::array<std::int16_t, quant::qk_legacy> w;  // q - 8
+    static constexpr std::size_t qk = quant::qk_legacy;
+    struct scales {
         float d;
     };
-    static unpacked unpack(const std::byte* row, std::size_t i) noexcept {
+    static scales unpack(const std::byte* row, std::size_t i, std::int16_t* w) noexcept {
         const auto b = quant::detail::load_block<quant::block_q4_0>(row + i * sizeof(quant::block_q4_0));
-        unpacked u{};
-        for (std::size_t j = 0; j < quant::qk_legacy / 2; ++j) {
-            u.w[j] = static_cast<std::int16_t>((b.qs[j] & 0x0f) - 8);
-            u.w[j + quant::qk_legacy / 2] = static_cast<std::int16_t>((b.qs[j] >> 4) - 8);
+        for (std::size_t j = 0; j < qk / 2; ++j) {
+            w[j] = static_cast<std::int16_t>((b.qs[j] & 0x0f) - 8);
+            w[j + qk / 2] = static_cast<std::int16_t>((b.qs[j] >> 4) - 8);
         }
-        u.d = fp16_to_float(b.d);
-        return u;
+        return {fp16_to_float(b.d)};
     }
-    static float dot(const unpacked& u, act a, std::size_t i) noexcept {
-        const std::int32_t sumi =
-            mtl::simd::reduce_dot_widen<std::int32_t>(u.w.data(), a.wide + i * quant::qk_legacy, quant::qk_legacy);
-        return static_cast<float>(sumi) * u.d * fp16_to_float(a.blocks[i].d);
+    static float act_scale(act a, std::size_t i) noexcept {
+        return fp16_to_float(a.blocks[i].d);
     }
 };
 
@@ -102,23 +109,19 @@ struct block_kernel<quant::scheme<quant::tensor_type::q4_0>> {
 template <>
 struct block_kernel<quant::scheme<quant::tensor_type::q8_0>> {
     using act = activations<quant::block_q8_0>;
-    struct unpacked {
-        std::array<std::int16_t, quant::qk_legacy> w;
+    static constexpr std::size_t qk = quant::qk_legacy;
+    struct scales {
         float d;
     };
-    static unpacked unpack(const std::byte* row, std::size_t i) noexcept {
+    static scales unpack(const std::byte* row, std::size_t i, std::int16_t* w) noexcept {
         const auto b = quant::detail::load_block<quant::block_q8_0>(row + i * sizeof(quant::block_q8_0));
-        unpacked u{};
-        for (std::size_t j = 0; j < quant::qk_legacy; ++j) {
-            u.w[j] = b.qs[j];
+        for (std::size_t j = 0; j < qk; ++j) {
+            w[j] = b.qs[j];
         }
-        u.d = fp16_to_float(b.d);
-        return u;
+        return {fp16_to_float(b.d)};
     }
-    static float dot(const unpacked& u, act a, std::size_t i) noexcept {
-        const std::int32_t sumi =
-            mtl::simd::reduce_dot_widen<std::int32_t>(u.w.data(), a.wide + i * quant::qk_legacy, quant::qk_legacy);
-        return static_cast<float>(sumi) * (u.d * fp16_to_float(a.blocks[i].d));
+    static float act_scale(act a, std::size_t i) noexcept {
+        return fp16_to_float(a.blocks[i].d);
     }
 };
 
@@ -127,42 +130,37 @@ struct block_kernel<quant::scheme<quant::tensor_type::q8_0>> {
 template <>
 struct block_kernel<quant::scheme<quant::tensor_type::q4_k>> {
     using act = activations<quant::block_q8_k>;
-    struct unpacked {
-        std::array<std::int16_t, quant::qk_k> w;  // sc_j * q
-        std::array<std::uint8_t, 8> m;            // sub-block mins
+    static constexpr std::size_t qk = quant::qk_k;
+    static constexpr bool has_mins = true;
+    struct scales {
         float d, dmin;
     };
-    static unpacked unpack(const std::byte* row, std::size_t i) noexcept {
+    /// Also writes the block's min operand: m_{j/2} for each of its 16
+    /// 16-element sub-block sums (the Q8_K bsums it multiplies).
+    static scales unpack(const std::byte* row, std::size_t i, std::int16_t* w, std::int16_t* m16) noexcept {
         const auto b = quant::detail::load_block<quant::block_q4_k>(row + i * sizeof(quant::block_q4_k));
-        unpacked u{};
+        const scales s{fp16_to_float(b.d), fp16_to_float(b.dmin)};
         std::array<std::uint8_t, 8> sc{};
+        std::array<std::uint8_t, 8> m{};
         for (std::size_t j = 0; j < 8; ++j) {
-            quant::q4_k_scale_min(j, b.scales, sc[j], u.m[j]);
+            quant::q4_k_scale_min(j, b.scales, sc[j], m[j]);
+        }
+        for (std::size_t j = 0; j < qk / 16; ++j) {
+            m16[j] = m[j / 2];
         }
         // Weight operand sc_j * q (<= 63 * 15): sub-block 2k is the low
         // nibbles of qs[32k..32k+31], sub-block 2k+1 the high nibbles.
         for (std::size_t k = 0; k < 4; ++k) {
             const std::uint8_t* q = b.qs + 32 * k;
             for (std::size_t l = 0; l < 32; ++l) {
-                u.w[64 * k + l] = static_cast<std::int16_t>(sc[2 * k] * (q[l] & 0x0f));
-                u.w[64 * k + 32 + l] = static_cast<std::int16_t>(sc[2 * k + 1] * (q[l] >> 4));
+                w[64 * k + l] = static_cast<std::int16_t>(sc[2 * k] * (q[l] & 0x0f));
+                w[64 * k + 32 + l] = static_cast<std::int16_t>(sc[2 * k + 1] * (q[l] >> 4));
             }
         }
-        u.d = fp16_to_float(b.d);
-        u.dmin = fp16_to_float(b.dmin);
-        return u;
+        return s;
     }
-    static float dot(const unpacked& u, act a, std::size_t i) noexcept {
-        const quant::block_q8_k& y = a.blocks[i];
-        const std::int32_t sumi =
-            mtl::simd::reduce_dot_widen<std::int32_t>(u.w.data(), a.wide + i * quant::qk_k, quant::qk_k);
-        std::int32_t summ = 0;  // sum_j m_j * sum(a_j), from the 16-wide bsums
-        for (std::size_t j = 0; j < quant::qk_k / 16; ++j) {
-            summ += y.bsums[j] * u.m[j / 2];
-        }
-        const float d = u.d * y.d;
-        const float dmin = u.dmin * y.d;
-        return d * static_cast<float>(sumi) - dmin * static_cast<float>(summ);
+    static float act_scale(act a, std::size_t i) noexcept {
+        return a.blocks[i].d;
     }
 };
 
@@ -170,20 +168,19 @@ struct block_kernel<quant::scheme<quant::tensor_type::q4_k>> {
 template <>
 struct block_kernel<quant::scheme<quant::tensor_type::q6_k>> {
     using act = activations<quant::block_q8_k>;
-    struct unpacked {
-        std::array<std::int16_t, quant::qk_k> w;  // sc_{e/16} * (q_e - 32)
+    static constexpr std::size_t qk = quant::qk_k;
+    struct scales {
         float d;
     };
-    static unpacked unpack(const std::byte* row, std::size_t i) noexcept {
+    static scales unpack(const std::byte* row, std::size_t i, std::int16_t* w) noexcept {
         const auto b = quant::detail::load_block<quant::block_q6_k>(row + i * sizeof(quant::block_q6_k));
-        unpacked u{};
         // Weight operand sc_{e/16} * (q_e - 32) (|.| <= 128 * 32), in element
         // order; the bit layout is the one dequantize(block_q6_k) decodes.
         for (std::size_t n = 0; n < 2; ++n) {
             const std::uint8_t* ql = b.ql + 64 * n;
             const std::uint8_t* qh = b.qh + 32 * n;
             const std::int8_t* sc = b.scales + 8 * n;
-            std::int16_t* out = u.w.data() + 128 * n;
+            std::int16_t* out = w + 128 * n;
             for (std::size_t l = 0; l < 32; ++l) {
                 const std::size_t is = l / 16;
                 const int q1 = ((ql[l] & 0x0f) | (((qh[l] >> 0) & 3) << 4)) - 32;
@@ -196,13 +193,59 @@ struct block_kernel<quant::scheme<quant::tensor_type::q6_k>> {
                 out[l + 96] = static_cast<std::int16_t>(sc[is + 6] * q4);
             }
         }
-        u.d = fp16_to_float(b.d);
-        return u;
+        return {fp16_to_float(b.d)};
     }
-    static float dot(const unpacked& u, act a, std::size_t i) noexcept {
-        const std::int32_t sumi =
-            mtl::simd::reduce_dot_widen<std::int32_t>(u.w.data(), a.wide + i * quant::qk_k, quant::qk_k);
-        return u.d * a.blocks[i].d * static_cast<float>(sumi);
+    static float act_scale(act a, std::size_t i) noexcept {
+        return a.blocks[i].d;
+    }
+};
+
+template <typename K>
+concept has_min_term = requires { requires K::has_mins; };
+
+/// Up to chunk_elements weights of one row, unpacked: blocks b0 .. b0+nb-1.
+template <quant::Scheme S>
+struct weight_chunk {
+    using K = block_kernel<S>;
+    static constexpr std::size_t max_blocks = chunk_elements / K::qk;
+    /// Sub-block sums per block in Q8_K, the operand of the K formats' mins.
+    static constexpr std::size_t sub_blocks = 16;
+    std::array<std::int16_t, chunk_elements> w;
+    std::array<std::int16_t, has_min_term<K> ? max_blocks * sub_blocks : 1> m16;
+    std::array<typename K::scales, max_blocks> s;
+    std::size_t b0 = 0, nb = 0;
+
+    /// Unpack blocks [b0, b0 + nb) of the row at `row`.  Pre: nb <= max_blocks.
+    void load(const std::byte* row, std::size_t first, std::size_t count) noexcept {
+        b0 = first;
+        nb = count;
+        for (std::size_t b = 0; b < nb; ++b) {
+            if constexpr (has_min_term<K>) {
+                s[b] = K::unpack(row, b0 + b, w.data() + b * K::qk, m16.data() + b * sub_blocks);
+            } else {
+                s[b] = K::unpack(row, b0 + b, w.data() + b * K::qk);
+            }
+        }
+    }
+
+    /// This chunk's contribution against one activation row: one block-scaled
+    /// reduction with scales d_w * d_a, less (for the K formats with mins) a
+    /// second over the mins and Q8_K's sub-block sums with scales dmin_w * d_a.
+    float dot(typename K::act a) const noexcept {
+        std::array<float, max_blocks> scale;
+        for (std::size_t b = 0; b < nb; ++b) {
+            scale[b] = s[b].d * K::act_scale(a, b0 + b);
+        }
+        float sum = mtl::simd::reduce_dot_block_scaled(w.data(), a.wide + b0 * K::qk, scale.data(), nb, K::qk);
+        if constexpr (has_min_term<K>) {
+            std::array<float, max_blocks> min_scale;
+            for (std::size_t b = 0; b < nb; ++b) {
+                min_scale[b] = s[b].dmin * K::act_scale(a, b0 + b);
+            }
+            sum -= mtl::simd::reduce_dot_block_scaled(
+                m16.data(), a.bsums + b0 * sub_blocks, min_scale.data(), nb, sub_blocks);
+        }
+        return sum;
     }
 };
 
@@ -237,8 +280,10 @@ float row_dot(const std::byte* x, activations<typename S::vec_dot_block> a, std:
             sumf += plain_kernel<S>::dot(buf.data(), a.x, i, len);
         }
     } else {
-        for (std::size_t i = 0; i < blocks; ++i) {
-            sumf += block_kernel<S>::dot(block_kernel<S>::unpack(x, i), a, i);
+        weight_chunk<S> c;
+        for (std::size_t b0 = 0; b0 < blocks; b0 += weight_chunk<S>::max_blocks) {
+            c.load(x, b0, std::min(weight_chunk<S>::max_blocks, blocks - b0));
+            sumf += c.dot(a);
         }
     }
     return sumf;

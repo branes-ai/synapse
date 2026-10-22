@@ -52,7 +52,7 @@ endif()
 # -DSYNAPSE_SHOW_DEP_WARNINGS=ON --compile-no-warning-as-error.
 option(SYNAPSE_SHOW_DEP_WARNINGS "Treat MTL5/Universal headers as non-system (show their warnings)" OFF)
 
-set(SYNAPSE_MTL5_VERSION      5.19.0)
+set(SYNAPSE_MTL5_VERSION      5.20.0)
 set(SYNAPSE_UNIVERSAL_VERSION 5.11.0)
 
 if(NOT TARGET MTL5::mtl5)
