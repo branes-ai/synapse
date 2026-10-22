@@ -136,7 +136,7 @@ auto logits = model.forward(input_tokens);
 2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
 3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp` and `kernels/gemm.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels; each gemm row is bit-identical to gemv. Threading and register-level tiling to follow.)*
 4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution. *(Done: `graph/`, for decode and for batched prefill of up to `max_batch` tokens per run.)*
-5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`. *(Done for Llama decode: `models/llama.hpp`, RoPE and grouped-query attention over an F16 KV cache in `kernels/attention.hpp`, and `tools/llama_decode`. Logits are checked against llama.cpp on llama.cpp-generated fixtures and, opt-in, on Llama-3.2-1B Q4_K_M. Prompts prefill in batches, bit-identical to token-by-token decoding. A tokenizer follows.)*
+5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`. *(Done for Llama decode: `models/llama.hpp`, RoPE and grouped-query attention over an F16 KV cache in `kernels/attention.hpp`, and `tools/llama_decode`. Logits are checked against llama.cpp on llama.cpp-generated fixtures and, opt-in, on Llama-3.2-1B Q4_K_M. Prompts prefill in batches, bit-identical to token-by-token decoding. Text prompts are tokenized by `tokenizer/bpe.hpp`, which matches llama.cpp's tokenizer on Llama-3 vocabularies.)*
 
 ## Building and testing
 
@@ -299,12 +299,14 @@ std::span<float> logits = s.tensor(model->logits); // for the run's last token
 
 A batched run quantizes each token's activations once and unpacks every weight block once for the whole batch (`kernels::gemm`). Each gemm row performs exactly gemv's operations, so prefilling a prompt gives bit-for-bit the logits and KV cache of decoding it token by token. On Llama-3.2-1B, prefill runs 4.5x faster than token-by-token decoding (single thread).
 
-Llama-3.2-1B Q4_K_M decodes in a 515 KiB arena. Its logits agree with llama.cpp's to ~1e-7 until the first 8-bit activation rounding that falls differently, then to a few percent, the same distance synapse moves from itself under a comparable perturbation. llama.cpp's top token is synapse's top token at every position of the test prompt. On an all-F32 model, where no activation is quantized, the two agree to 2e-7 at every position. `tools/llama_decode` runs greedy generation:
+Llama-3.2-1B Q4_K_M decodes in a 515 KiB arena. Its logits agree with llama.cpp's to ~1e-7 until the first 8-bit activation rounding that falls differently, then to a few percent, the same distance synapse moves from itself under a comparable perturbation. llama.cpp's top token is synapse's top token at every position of the test prompt. On an all-F32 model, where no activation is quantized, the two agree to 2e-7 at every position. `tools/llama_decode` runs greedy generation from a text prompt:
 
 ```text
-$ llama_decode Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 24 128000 791 6864 315 9822 374
-<|begin_of_text|>The capital of France is Paris. The Eiffel Tower is a famous landmark in Paris. The Eiffel Tower is a symbol of France
+$ llama_decode Llama-3.2-1B-Instruct-Q4_K_M.gguf -n 40 -p "The three primary colors are"
+<|begin_of_text|>The three primary colors are red, blue, and yellow. These colors are combined in different ways to create various shades and hues of colors.
 ```
+
+The tokenizer (`tokenizer/`) implements byte-level BPE with Llama 3's pre-tokenizer: special-token splitting, the split regex as a hand-written matcher over Unicode 15.1 character classes, and rank-ordered merges. It reproduces llama.cpp's `llama_tokenize` and `token_to_piece` exactly, on llama.cpp's own tokenizer test vectors and synapse's edge cases (scripts, emoji, whitespace runs, special tokens, invalid UTF-8), for a synthetic vocabulary in CI and for the real 128K Llama-3 vocabulary (opt-in).
 
 ## License
 

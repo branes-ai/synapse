@@ -1,20 +1,21 @@
 // llama_decode — greedy decoding of a Llama-architecture GGUF model.
 //
-//   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [<token id>...]
+//   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>]
+//                (-p <prompt text> | <token id>...)
 //
-// Prefills the prompt token ids in runs of up to -b tokens (default 64; -b 1
-// decodes the prompt one token at a time, with the same result), then
-// generates -n more by taking the most likely next token each step. Prints
-// the tokens as text when the file carries a vocabulary, and the decode rate.
-// Without prompt tokens it starts from the model's BOS token.
-//
-// synapse has no tokenizer yet, so the prompt is given as token ids; the
-// vocabulary is only used to show the output.
+// Tokenizes the prompt (-p, for Llama-3-style BPE vocabularies; special
+// tokens such as <|eot_id|> in the text are recognized) or takes its token
+// ids, prefills it in runs of up to -b tokens (default 64; -b 1 decodes the
+// prompt one token at a time, with the same result), then generates up to
+// -n more by taking the most likely next token each step, stopping at the
+// end-of-sequence token. Prints the tokens as text and the prefill and decode
+// rates. Without a prompt it starts from the model's BOS token.
 
 #include <branes/synapse/gguf/mapped_file.hpp>
 #include <branes/synapse/gguf/reader.hpp>
 #include <branes/synapse/graph/session.hpp>
 #include <branes/synapse/models/llama.hpp>
+#include <branes/synapse/tokenizer/bpe.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -49,7 +50,8 @@ std::vector<std::uint32_t> code_points(std::string_view s) {
     return cps;
 }
 
-// A vocabulary entry as text. GPT-2-style BPE vocabularies (Llama 3) store
+// A vocabulary entry as text, for vocabularies the BPE tokenizer does not
+// support. GPT-2-style BPE vocabularies (Llama 3) store
 // each byte as a printable code point; SentencePiece ones (Llama 2) mark
 // spaces with U+2581 and store raw bytes as <0xNN>.
 class detokenizer {
@@ -114,8 +116,9 @@ std::optional<std::uint64_t> parse_uint(const char* s, std::uint64_t max) {
 }
 
 int usage(const char* argv0) {
-    std::fprintf(
-        stderr, "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [<token id>...]\n", argv0);
+    std::fprintf(stderr,
+                 "usage: %s <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] (-p <prompt> | <token id>...)\n",
+                 argv0);
     return 2;
 }
 
@@ -129,9 +132,12 @@ int main(int argc, char** argv) {
     std::size_t n_ctx = 0;
     std::size_t n_batch = 64;
     std::vector<std::uint32_t> prompt;
+    std::optional<std::string> text;
     for (int i = 2; i < argc; ++i) {
         const std::string_view a = argv[i];
-        if ((a == "-n" || a == "-c" || a == "-b") && i + 1 < argc) {
+        if (a == "-p" && i + 1 < argc) {
+            text = argv[++i];
+        } else if ((a == "-n" || a == "-c" || a == "-b") && i + 1 < argc) {
             // Positions are 32-bit, so neither count can usefully exceed that.
             const auto v = parse_uint(argv[++i], std::numeric_limits<std::uint32_t>::max());
             if (!v) {
@@ -160,6 +166,20 @@ int main(int argc, char** argv) {
                      std::string(to_string(parsed.error().code)).c_str(),
                      static_cast<unsigned long long>(parsed.error().offset));
         return 1;
+    }
+    if (text && !prompt.empty()) {
+        return usage(argv[0]);  // a prompt is text or ids, not both
+    }
+    auto bpe = tokenizer::bpe_tokenizer::from_gguf(*parsed);
+    if (text) {
+        if (!bpe) {
+            std::fprintf(stderr,
+                         "cannot tokenize -p for this model: %s %s\n",
+                         std::string(to_string(bpe.error().code)).c_str(),
+                         bpe.error().name.c_str());
+            return 1;
+        }
+        prompt = bpe->encode(*text, {.add_bos = true, .parse_special = true});
     }
     if (prompt.empty()) {
         if (const auto bos = parsed->get<std::uint32_t>("tokenizer.ggml.bos_token_id")) {
@@ -202,7 +222,9 @@ int main(int argc, char** argv) {
                  static_cast<double>(s.state_bytes()) / (1024.0 * 1024.0),
                  n_ctx);
 
-    const detokenizer vocab(*parsed);
+    const detokenizer fallback(*parsed);
+    const auto show = [&](std::uint32_t t) { return bpe ? bpe->decode(t, true) : fallback.text(t); };
+    const std::uint32_t eos = bpe ? bpe->eos() : tokenizer::no_token;
     using clock = std::chrono::steady_clock;
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
@@ -219,16 +241,16 @@ int main(int argc, char** argv) {
 
     const auto t0 = clock::now();
     for (std::uint32_t t : prompt) {
-        std::printf("%s", vocab.text(t).c_str());
+        std::printf("%s", show(t).c_str());
     }
     for (std::size_t i = 0; i < prompt.size(); i += n_batch) {
         run(prompt.data() + i, std::min(n_batch, prompt.size() - i));
     }
     std::fflush(stdout);
     const auto t1 = clock::now();
-    for (std::size_t i = 0; i < n_new && pos < n_ctx; ++i) {
+    for (std::size_t i = 0; i < n_new && pos < n_ctx && next != eos; ++i) {
         const std::uint32_t t = next;
-        std::printf("%s", vocab.text(t).c_str());
+        std::printf("%s", show(t).c_str());
         std::fflush(stdout);
         run(&t, 1);
     }
