@@ -11,4 +11,4 @@ file to run, so none is registered with CTest.
 
 | Tool | What it does |
 |---|---|
-| `llama_decode` | Greedy decoding of a Llama-architecture GGUF model: `llama_decode model.gguf [-n new] [-c ctx] [-b batch] [token ids...]`. The prompt is prefilled in runs of up to `-b` tokens (default 64), then tokens are generated one at a time. Prompt tokens are given as ids (synapse has no tokenizer yet); the output is shown as text from the model's vocabulary, with the prefill and decode rates. |
+| `llama_decode` | Greedy decoding of a Llama-architecture GGUF model: `llama_decode model.gguf [-n new] [-c ctx] [-b batch] (-p "text" \| token ids...)`. The prompt is tokenized (Llama-3 BPE vocabularies; special tokens like `<\|eot_id\|>` in the text are recognized) or given as ids, prefilled in runs of up to `-b` tokens (default 64), then tokens are generated one at a time until `-n` or the end-of-sequence token. Prints the text, with the prefill and decode rates. |

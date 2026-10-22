@@ -37,20 +37,10 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--llama-cpp", required=True, type=Path, help="path to a llama.cpp checkout")
-    ap.add_argument("--build-dir", type=Path, help="llama.cpp build directory (default: a temp dir)")
-    ap.add_argument("mode", choices=["tiny", "tiny-f32", "logits"])
-    ap.add_argument("model", type=Path, help="model to write (tiny) or read (logits)")
-    ap.add_argument("golden", type=Path, help="golden logits to write")
-    ap.add_argument("tokens", nargs="*", type=int, help="token ids to decode (logits mode)")
-    args = ap.parse_args()
-    if args.mode == "logits" and not args.tokens:
-        ap.error("logits mode needs at least one token")
-
-    llama = args.llama_cpp.resolve()
-    build = (args.build_dir or Path(tempfile.mkdtemp(prefix="synapse-llama-"))).resolve()
+def build_oracle(llama_cpp: Path, build_dir: Path | None) -> Path:
+    """Build libllama from the checkout (reusing build_dir) and the oracle against it."""
+    llama = llama_cpp.resolve()
+    build = (build_dir or Path(tempfile.mkdtemp(prefix="synapse-llama-"))).resolve()
     libs = [build / "src" / "libllama.a", build / "ggml" / "src" / "libggml.a",
             build / "ggml" / "src" / "libggml-cpu.a", build / "ggml" / "src" / "libggml-base.a"]
 
@@ -64,7 +54,22 @@ def main() -> None:
     run([os.environ.get("CXX", "c++"), "-std=c++17", "-O2", f"-I{llama / 'include'}",
          f"-I{llama / 'ggml' / 'include'}", str(HERE / "llama_oracle" / "oracle.cpp"), "-o", str(oracle),
          *map(str, libs), "-lpthread", "-lm"])
+    return oracle
 
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--llama-cpp", required=True, type=Path, help="path to a llama.cpp checkout")
+    ap.add_argument("--build-dir", type=Path, help="llama.cpp build directory (default: a temp dir)")
+    ap.add_argument("mode", choices=["tiny", "tiny-f32", "logits"])
+    ap.add_argument("model", type=Path, help="model to write (tiny) or read (logits)")
+    ap.add_argument("golden", type=Path, help="golden logits to write")
+    ap.add_argument("tokens", nargs="*", type=int, help="token ids to decode (logits mode)")
+    args = ap.parse_args()
+    if args.mode == "logits" and not args.tokens:
+        ap.error("logits mode needs at least one token")
+
+    oracle = build_oracle(args.llama_cpp, args.build_dir)
     for path in (args.model, args.golden):
         path.parent.mkdir(parents=True, exist_ok=True)
     run([str(oracle), args.mode, str(args.model), str(args.golden), *map(str, args.tokens)])

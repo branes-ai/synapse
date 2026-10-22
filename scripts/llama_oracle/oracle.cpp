@@ -17,6 +17,14 @@
 //   oracle logits <model.gguf> <golden.gguf> <token>...
 //       Decodes the given tokens through an existing model.
 //
+//   oracle tokenize <vocab.gguf> <cases.txt> <golden.gguf>
+//       Tokenizes each case of cases.txt (separated by lines holding
+//       __ggml_vocab_test__, llama.cpp's own test-vector format) with
+//       llama_tokenize, BOS added, once without and once with special-token
+//       parsing; and detokenizes the latter with llama_token_to_piece. The
+//       golden file holds, per case i, synapse.tok.<i>.text, .plain and
+//       .special (token arrays) and .detok, plus synapse.tok.count.
+//
 // Tokens are decoded one per llama_decode call (the decode path synapse
 // implements), with flash attention off and the default F16 KV cache. The
 // golden file holds the token ids (metadata array synapse.golden.tokens) and
@@ -212,6 +220,95 @@ void write_golden(const char* model_path, const char* golden_path, const std::ve
     llama_backend_free();
 }
 
+std::vector<llama_token> tokenize(const llama_vocab* vocab, const std::string& text, bool parse_special) {
+    std::vector<llama_token> out(text.size() + 8);
+    int32_t n = llama_tokenize(vocab,
+                               text.data(),
+                               static_cast<int32_t>(text.size()),
+                               out.data(),
+                               static_cast<int32_t>(out.size()),
+                               true,
+                               parse_special);
+    if (n < 0) {
+        out.resize(static_cast<size_t>(-n));
+        n = llama_tokenize(vocab,
+                           text.data(),
+                           static_cast<int32_t>(text.size()),
+                           out.data(),
+                           static_cast<int32_t>(out.size()),
+                           true,
+                           parse_special);
+    }
+    out.resize(static_cast<size_t>(n));
+    return out;
+}
+
+void write_tokenizer_golden(const char* vocab_path, const char* cases_path, const char* golden_path) {
+    std::FILE* in = std::fopen(cases_path, "rb");
+    if (in == nullptr) {
+        std::fprintf(stderr, "cannot read %s\n", cases_path);
+        std::exit(1);
+    }
+    std::string all;
+    char buf[4096];
+    for (size_t n; (n = std::fread(buf, 1, sizeof buf, in)) > 0;) {
+        all.append(buf, n);
+    }
+    std::fclose(in);
+    std::vector<std::string> cases;
+    const std::string sep = "\n__ggml_vocab_test__\n";
+    for (size_t at = 0;;) {
+        const size_t m = all.find(sep, at);
+        if (m == std::string::npos) {
+            break;
+        }
+        cases.push_back(all.substr(at, m - at));
+        at = m + sep.size();
+    }
+
+    llama_log_set(quiet_log, nullptr);
+    llama_backend_init();
+    llama_model_params mp = llama_model_default_params();
+    mp.vocab_only = true;
+    llama_model* model = llama_model_load_from_file(vocab_path, mp);
+    if (model == nullptr) {
+        std::fprintf(stderr, "cannot load %s\n", vocab_path);
+        std::exit(1);
+    }
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+
+    gguf_context* out = gguf_init_empty();
+    gguf_set_val_str(out, "general.architecture", "synapse-test");
+    gguf_set_val_str(out, "synapse.fixture.generator", "scripts/gen_tokenizer_fixture.py");
+    gguf_set_val_u32(out, "synapse.tok.count", static_cast<uint32_t>(cases.size()));
+    for (size_t i = 0; i < cases.size(); ++i) {
+        const std::string key = "synapse.tok." + std::to_string(i) + ".";
+        gguf_set_val_str(out, (key + "text").c_str(), cases[i].c_str());
+        for (bool special : {false, true}) {
+            const auto toks = tokenize(vocab, cases[i], special);
+            std::vector<uint32_t> ids(toks.begin(), toks.end());
+            gguf_set_arr_data(
+                out, (key + (special ? "special" : "plain")).c_str(), GGUF_TYPE_UINT32, ids.data(), ids.size());
+            if (special) {
+                std::string detok;
+                for (llama_token t : toks) {
+                    char piece[512];
+                    const int32_t n = llama_token_to_piece(vocab, t, piece, sizeof piece, 0, true);
+                    detok.append(piece, static_cast<size_t>(n > 0 ? n : 0));
+                }
+                gguf_set_val_str(out, (key + "detok").c_str(), detok.c_str());
+            }
+        }
+    }
+    if (!gguf_write_to_file(out, golden_path, false)) {
+        std::fprintf(stderr, "cannot write %s\n", golden_path);
+        std::exit(1);
+    }
+    gguf_free(out);
+    llama_model_free(model);
+    llama_backend_free();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -226,6 +323,10 @@ int main(int argc, char** argv) {
         write_golden(argv[2], argv[3], tokens);
         return 0;
     }
+    if (argc == 5 && std::strcmp(argv[1], "tokenize") == 0) {
+        write_tokenizer_golden(argv[2], argv[3], argv[4]);
+        return 0;
+    }
     if (argc >= 5 && std::strcmp(argv[1], "logits") == 0) {
         std::vector<llama_token> tokens;
         for (int i = 4; i < argc; ++i) {
@@ -236,7 +337,9 @@ int main(int argc, char** argv) {
     }
     std::fprintf(stderr,
                  "usage: %s tiny|tiny-f32 <model.gguf> <golden.gguf>\n"
-                 "       %s logits <model.gguf> <golden.gguf> <token>...\n",
+                 "       %s logits <model.gguf> <golden.gguf> <token>...\n"
+                 "       %s tokenize <vocab.gguf> <cases.txt> <golden.gguf>\n",
+                 argv[0],
                  argv[0],
                  argv[0]);
     return 2;
