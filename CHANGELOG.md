@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/branes-ai/synapse/compare/v0.6.1...v0.7.0) (2026-10-22)
+
+
+### Features
+
+* **tokenizer:** llama-3 byte-level bpe tokenizer matching llama.cpp ([#20](https://github.com/branes-ai/synapse/issues/20)) ([67508f2](https://github.com/branes-ai/synapse/commit/67508f21bdc0028b558145f787e037f3ae8cec7a))
+
 ## [0.6.1](https://github.com/branes-ai/synapse/compare/v0.6.0...v0.6.1) (2026-10-21)
 
 
