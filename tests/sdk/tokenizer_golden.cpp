@@ -13,31 +13,14 @@
 
 #include "../support/tokenizer_golden.hpp"
 
+#include "../support/env.hpp"
+
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstdlib>
 #include <optional>
 #include <string>
 
-namespace {
-
-std::optional<std::string> env(const char* name) {
-#if defined(_MSC_VER)
-    char* value = nullptr;
-    std::size_t len = 0;
-    if (_dupenv_s(&value, &len, name) != 0 || value == nullptr) {
-        return std::nullopt;
-    }
-    std::string s(value);
-    std::free(value);
-    return s;
-#else
-    const char* value = std::getenv(name);
-    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
-#endif
-}
-
-}  // namespace
+using synapse_test::get_env;
 
 TEST_CASE("tokenizer_golden: encode and decode match llama.cpp on the synthetic vocabulary", "[tokenizer][golden]") {
     const std::string dir = SYNAPSE_TEST_DATA_DIR;
@@ -48,8 +31,8 @@ TEST_CASE("tokenizer_golden: encode and decode match llama.cpp on the synthetic 
 // or a Llama-3 model) and SYNAPSE_BPE_GOLDEN (scripts/gen_tokenizer_fixture.py
 // golden <vocab> <golden>).
 TEST_CASE("tokenizer_golden: encode and decode match llama.cpp on a real vocabulary", "[tokenizer][golden][model]") {
-    const auto vocab = env("SYNAPSE_BPE_VOCAB");
-    const auto golden = env("SYNAPSE_BPE_GOLDEN");
+    const auto vocab = get_env("SYNAPSE_BPE_VOCAB");
+    const auto golden = get_env("SYNAPSE_BPE_GOLDEN");
     if (!vocab || !golden) {
         SKIP("set SYNAPSE_BPE_VOCAB and SYNAPSE_BPE_GOLDEN to run");
     }
