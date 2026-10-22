@@ -70,3 +70,6 @@ Testing/
 # Claude Code session state — ignore everything except the shared team config.
 .claude/*
 !.claude/settings.json
+
+# Python bytecode (scripts/ import each other)
+__pycache__/
