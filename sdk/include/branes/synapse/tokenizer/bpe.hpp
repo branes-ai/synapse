@@ -29,8 +29,11 @@
 /// Invariants (established by from_gguf)
 /// ----------
 ///   T1: every id in ids_, specials_, bos_, eos_ is < tokens_.size()
-///   T2: decode(encode(s)) == s for valid UTF-8 s with no special-token text
-///       (each byte has a single-character token: checked at load)
+///   T2: decode(encode(s)) == s for valid UTF-8 s with no special-token text.
+///       From two load-time checks: each byte has a single-character token,
+///       and each merge's operands and result are tokens. So every piece BPE
+///       leaves is a token, and no character is ever dropped. (Every
+///       byte-level vocabulary llama.cpp ships satisfies both.)
 ///
 /// The tokenizer allocates; it belongs at the application boundary, outside
 /// the allocation-free session::run.
@@ -155,10 +158,13 @@ public:
             // "left right", split at the first space after the first character
             // (a left side can itself be a space-like character).
             const std::size_t sp = rules[i].find(' ', 1);
-            std::string left, right;
-            if (sp != std::string_view::npos) {
-                left = rules[i].substr(0, sp);
-                right = rules[i].substr(sp + 1);
+            if (sp == std::string_view::npos) {
+                return fail(tokenizer_errc::bad_value, "tokenizer.ggml.merges");
+            }
+            const std::string left(rules[i].substr(0, sp));
+            const std::string right(rules[i].substr(sp + 1));
+            if (!t.ids_.contains(left) || !t.ids_.contains(right) || !t.ids_.contains(left + right)) {
+                return fail(tokenizer_errc::bad_value, "tokenizer.ggml.merges");  // T2
             }
             t.ranks_.emplace(pair_key(left, right), i);
         }
@@ -433,7 +439,9 @@ private:
             if (const auto id = id_of(piece)) {
                 out.push_back(*id);
             } else {
-                // No token for the piece: fall back to its single bytes' tokens.
+                // No token for the piece: fall back to its single bytes' tokens,
+                // as llama.cpp does. Unreachable for a vocabulary that passed
+                // from_gguf's checks (T2); kept for parity.
                 for (char ch : piece) {
                     if (const auto b = id_of(std::string(1, ch))) {
                         out.push_back(*b);

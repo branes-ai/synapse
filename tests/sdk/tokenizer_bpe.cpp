@@ -168,6 +168,16 @@ TEST_CASE("tokenizer_bpe: rejects vocabularies it cannot tokenize correctly", "[
         require_error(spec, tokenizer_errc::bad_value, "tokenizer.ggml.token_type");
     }
     {
+        vocab_spec spec;  // T2: a merge whose result is no token would drop characters
+        spec.keys["tokenizer.ggml.merges"] = string_array("tokenizer.ggml.merges", {"a b", "b c"});
+        require_error(spec, tokenizer_errc::bad_value, "tokenizer.ggml.merges");
+    }
+    {
+        vocab_spec spec;  // a merge rule must name two operands
+        spec.keys["tokenizer.ggml.merges"] = string_array("tokenizer.ggml.merges", {"ab"});
+        require_error(spec, tokenizer_errc::bad_value, "tokenizer.ggml.merges");
+    }
+    {
         vocab_spec spec;  // T2: a byte with no token cannot be encoded
         spec.tokens[0] = "x!";
         require_error(spec, tokenizer_errc::bad_value, "tokenizer.ggml.tokens");
