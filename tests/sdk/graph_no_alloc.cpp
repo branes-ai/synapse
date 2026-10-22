@@ -9,6 +9,7 @@
 #include <branes/synapse/graph/session.hpp>
 #include <branes/synapse/models/llama.hpp>
 
+#include "../support/env.hpp"
 #include "../support/random_weights.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -235,5 +236,28 @@ TEST_CASE("graph_no_alloc: batched prefill performs no allocation", "[graph][ses
     armed = false;
     CHECK(first);
     CHECK(second);
+    CHECK(allocations == 0);
+}
+
+TEST_CASE("graph_no_alloc: multithreaded runs perform no allocation (P1)", "[graph][session][llama][threads]") {
+    using namespace branes::synapse;
+    synapse_test::set_env("MTL5_NUM_THREADS", "4");  // before the pool's first use
+    auto file = gguf::mapped_file::open(std::string(SYNAPSE_TEST_DATA_DIR) + "/llama_tiny.gguf");
+    REQUIRE(file);
+    auto parsed = gguf::parse(file->bytes());
+    REQUIRE(parsed);
+    auto model = models::load_llama(*parsed, 16, 8);
+    REQUIRE(model);
+    session s{model->graph, 0};  // creates the pool's threads: allocations, before arming
+    INFO("threads " << s.threads());
+    const std::uint32_t tokens[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+
+    allocations = 0;
+    armed = true;
+    const bool prefill = s.run(batch{tokens, 0});
+    const bool decode = s.run({9, 8});
+    armed = false;
+    CHECK(prefill);
+    CHECK(decode);
     CHECK(allocations == 0);
 }
