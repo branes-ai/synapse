@@ -21,11 +21,12 @@ Fixing both in synapse turned a 21% prefill **loss** into a 23% **gain**.
 ## Contents
 
 1. [Background: what changed and why](#1-background)
-2. [Machine and methodology](#2-machine-and-methodology)
-3. [The investigation, step by step](#3-the-investigation)
-4. [Results](#4-results)
-5. [Lessons](#5-lessons)
-6. [Appendix: command reference](#6-appendix-command-reference)
+2. [The workload: prefill, decode, and the matvec kernel](#2-the-workload)
+3. [Machine and methodology](#3-machine-and-methodology)
+4. [The investigation, step by step](#4-the-investigation)
+5. [Results](#5-results)
+6. [Lessons](#6-lessons)
+7. [Appendix: command reference](#7-appendix-command-reference)
 
 ---
 
@@ -63,7 +64,189 @@ independent (row, token) sums, so it is free to tune.
 
 ---
 
-## 2. Machine and methodology
+## 2. The workload
+
+The experiments below move between three levels:
+- the whole model's **decode** step (one token);
+- its **prefill** step (a batch of prompt tokens);
+- the **matvec/gemm kernel** that both spend almost all their time in.
+
+This section describes what each one computes and how much data it touches.
+The numbers are for Llama-3.2-1B-Instruct Q4_K_M, as tallied from the GGUF
+file.
+
+### 2.1 The model
+
+| | |
+|---|---|
+| layers | 16 |
+| model width `d` | 2048 |
+| feed-forward width | 8192 |
+| attention | 32 query heads, 8 KV heads (grouped-query, 4:1), head dimension 64 |
+| vocabulary | 128,256 tokens |
+| output projection | tied to the token embedding |
+| total weights | 1.236 billion, in 762.8 MiB (the 807 MB file) |
+
+#### Weight matrices of one layer
+
+A matrix W[rows × cols] is applied as y = W x: `rows` outputs, each a dot
+product over `cols` inputs.
+
+| matrix | rows × cols | format | weights | bytes |
+|---|---|---|---|---|
+| `attn_q` | 2048 × 2048 | Q4_K | 4.19 M | 2.25 MiB |
+| `attn_k` | 512 × 2048 | Q4_K | 1.05 M | 0.56 MiB |
+| `attn_v` | 512 × 2048 | Q4_K in 8 layers, Q6_K in 8 | 1.05 M | 0.56 / 0.82 MiB |
+| `attn_output` | 2048 × 2048 | Q4_K | 4.19 M | 2.25 MiB |
+| `ffn_gate` | 8192 × 2048 | Q4_K | 16.78 M | 9.00 MiB |
+| `ffn_up` | 8192 × 2048 | Q4_K | 16.78 M | 9.00 MiB |
+| `ffn_down` | 2048 × 8192 | Q4_K in 8 layers, Q6_K in 8 | 16.78 M | 9.00 / 13.13 MiB |
+| two RMSNorm weights | 2048 each | F32 | 4 K | 16 KiB |
+| **per layer** | | | **60.8 M** | **32.6 MiB (Q4_K layer) / 37.0 MiB (Q6_K layer)** |
+
+The token embedding / output matrix is **128,256 × 2048 in Q6_K**: 262.7 M
+weights, 205.5 MiB. All 16 layers together hold 557 MiB.
+
+#### Block formats
+
+GGML's formats, stored in the file and read in place:
+
+| format | weights per block | bytes per block | bits per weight | contents |
+|---|---|---|---|---|
+| Q4_K | 256 | 144 | 4.5 | fp16 `d` and `dmin`; 8 sub-blocks of 32, each with a 6-bit scale and a 6-bit min; 4-bit quants |
+| Q6_K | 256 | 210 | 6.56 | fp16 `d`; 16 sub-blocks of 16, each with a signed 8-bit scale; 6-bit quants split into 4-bit and 2-bit planes |
+| Q8_K (activations) | 256 | 292 | — | float `d`; 256 int8 quants; 16 int16 sub-block sums (`bsums`) |
+
+A Q4_K weight is `d·sc_j·q − dmin·m_j`. Its dot product with Q8_K
+activations therefore has two parts:
+- the main integer sum, Σ sc_j·q·a;
+- a **min term**, dmin · Σ_j m_j · bsums_j, which uses the activations'
+  sub-block sums.
+
+That min term turned out to be the crux of this investigation (step 12).
+
+### 2.2 Decode: one token
+
+Each layer runs these operators in order. *d* = 2048; *p* is the token's
+position in the sequence.
+
+1. `rms_norm` of the residual (d floats).
+2. Three matvecs: **q**, **k**, **v**.
+3. **RoPE** on q (32 heads) and k (8 heads).
+4. **Append** k and v to the layer's KV cache, as F16.
+5. **Attention** of the 32 query heads over cache rows 0..p. Each KV head
+   serves 4 query heads.
+6. Matvec **o**, then a residual add.
+7. `rms_norm`, then the matvecs **gate** and **up** (8192 outputs each).
+8. `silu(gate) · up`.
+9. Matvec **down** (back to 2048), then a residual add.
+
+Then a final `rms_norm`, the **logits** matvec (128,256 × 2048) and an argmax.
+
+| per decode token | amount |
+|---|---|
+| matvec multiply-accumulates | 1.236 G (973 M in the layers + 263 M for the logits) |
+| weight bytes read | **762.8 MiB**: every weight once; the embedding contributes one 1.7 KB row |
+| attention multiply-accumulates | 16 layers × 32 heads × 64 × 2 × (*p*+1) = 65,536·(*p*+1), about 6 M at *p* = 93, **0.5%** of the matvecs |
+| element-wise ops (norms, RoPE, silu, adds) | about 0.5 M floats, negligible |
+| arithmetic intensity | about **1.6 multiply-accumulates per weight byte** |
+| activation arena (planned, reused across layers) | 515.6 KiB |
+| KV cache | 32 KiB per position (16 layers × K,V × 8 heads × 64 × 2 bytes); 3.4 MiB for 109 positions |
+
+Decode is a sequence of **matrix-vector products** that stream the whole
+model through the cores for every token, with very little arithmetic per byte.
+- **One thread at 3.73 tok/s:** 268 ms per token, which is 2.98 GB/s of
+  weights and 4.6 G multiply-accumulates/s. One core is compute-bound on
+  decoding the 4- and 6-bit weights.
+- **20 threads at about 30 tok/s:** about 24 GB/s and 37 G/s. That is only an
+  8× gain for 20 threads, consistent with the cores saturating memory
+  bandwidth. The machine's peak DRAM bandwidth was not measured.
+
+### 2.3 Prefill: a batch of prompt tokens
+
+Prefill runs the same operators, but every activation is a matrix of *n*
+tokens × width:
+- **Matvecs become gemms.** Each weight row is read and unpacked **once per
+  batch** and then dotted with all *n* tokens' activations.
+- **RoPE, attention and the norms** work per token. Attention processes the
+  batch's tokens in order, each over its own causal prefix.
+- **Logits** are computed only for the batch's last token (`last_row`), as
+  llama.cpp does.
+
+`llama_decode` prefills in batches of at most `-b` tokens, 64 by default. The
+93-token prompt used throughout this document therefore runs as two batches,
+**64 + 29**.
+
+| 93-token prompt, batches of 64 + 29 | amount |
+|---|---|
+| multiply-accumulates | 93 × 973 M + 2 × 263 M (logits once per batch) = **91.0 G** |
+| weight bytes read | 2 × 762.8 MiB = 1.5 GiB (each batch reads every weight once) |
+| arithmetic intensity | about **57 multiply-accumulates per weight byte**, about 35× decode |
+| activation arena, batch of 64 | 6.5 MiB: the residual is 64 × 2048 floats (512 KiB); each FFN intermediate is 64 × 8192 floats (2 MiB) |
+| per-matmul activation scratch, batch of 64 | 64 × 6.5 KiB = 418 KiB (2048-column inputs) or 64 × 26.1 KiB = 1.63 MiB (8192-column inputs) |
+
+So prefill is **compute-bound**.
+- **One thread at 37.1 tok/s:** the prompt takes 2.51 s, which is 36 G
+  multiply-accumulates/s.
+- **The ceiling:** AVX2's `vpmaddwd` does 16 int16 multiply-adds per
+  instruction, and a P-core issues two per cycle. That gives about 32 per
+  cycle, roughly 150 G/s at the 12700K's turbo clocks. This is an estimate,
+  since the clock varies with load.
+- **Where the rest goes:** prefill reaches about a quarter of that ceiling.
+  The remainder is spent unpacking 4-bit and 6-bit weights to int16,
+  quantizing activations, converting and scaling block sums, and loop
+  overhead. That is why the unpack cost and the min term are what the
+  experiments turned on.
+
+### 2.4 The matvec/gemm kernel
+
+One quantized matmul, `y = W x` for *n* tokens, has three phases.
+
+**1. Quantize the activations: once per token, per matmul.**
+- Each token's input row (*cols* floats) becomes Q8_K blocks: per 256
+  values, a scale `d = max|x| / 127`, 256 int8 quants, and 16 sub-block sums.
+- The quants are widened to int16 for `vpmaddwd`, and the sub-block sums are
+  copied out contiguously.
+- That is 6.5 KiB per token for 2048 columns.
+
+**2. Unpack a chunk of a weight row: once per row, per batch.**
+- A chunk is 1024 weights, which is 4 Q4_K blocks or 576 bytes.
+- It becomes 1024 int16 operands, with the 6-bit sub-block scale folded in
+  (|sc·q| ≤ 945), plus 64 int16 mins (16 per block) and each block's `d` and
+  `dmin`.
+- That is about 2.1 KiB, on the stack. Q6_K does the same, rebuilding each
+  6-bit quant from a 4-bit and a 2-bit plane and applying 16 signed scales.
+  That makes it the most expensive unpack.
+
+**3. Dot the chunk with each token** (`weight_chunk::dot`):
+- `scales[b] = d_w·d_a` for each of the 4 blocks;
+- **one** `reduce_dot_block_scaled` over the 1024 int16 pairs: 64
+  `vpmaddwd`, 4 convert-and-fma steps, then a single horizontal reduce;
+- for Q4_K, a second `reduce_dot_block_scaled` for the min term: 64 int16
+  pairs (mins against sub-block sums), 4 `vpmaddwd`;
+- the result is added into `y[t·rows + r]`.
+
+**Cache footprint, which is what the tiling experiments were about.**
+- **Per token:** a chunk's activations are 2 KiB.
+- **Per batch:** for a 64-token batch that is 128 KiB per chunk, larger than
+  a P-core's 48 KiB L1. The old per-block loop touched 64 × 512 B = 32 KiB
+  per weight block and stayed in L1.
+- **The tile:** the rows × tokens tile (4 rows) unpacks 4 rows' chunks
+  (about 8.5 KiB) and reuses each token's 2 KiB activation chunk four times
+  while it is hot.
+
+**The `gemv_bench` shapes** (4096 × 4096, *n* = 1, 16.8 M multiply-accumulates):
+
+| format | weight bytes | time (after) | weight bandwidth, one core |
+|---|---|---|---|
+| Q4_0 | 9.0 MiB (18 B per 32 weights) | 3.88 ms | 2.4 GB/s |
+| Q8_0 | 17.0 MiB (34 B per 32 weights) | 3.92 ms | 4.6 GB/s |
+| Q4_K | 9.0 MiB | 1.12 ms | 8.4 GB/s (15 G multiply-accumulates/s) |
+| Q6_K | 13.1 MiB | 8.22 ms | 1.7 GB/s: bound by unpacking, not memory |
+
+---
+
+## 3. Machine and methodology
 
 | | |
 |---|---|
@@ -77,7 +260,9 @@ independent (row, token) sums, so it is free to tune.
 `tools/llama_decode` reports prefill and decode rates. The first measurements
 used a 6-token prompt, and that turned out to be **too short**: prefill took
 about 50 ms and the 20-thread numbers were noise. All the conclusions below
-use a **93-token prompt**, run three times each:
+use a **93-token prompt**, run three times each. `llama_decode` prefills in
+batches of at most `-b` tokens (64 by default), so this prompt runs as two
+batches of 64 and 29 tokens (see §2.3):
 
 ```bash
 P="$(python3 -c "print(' '.join(['The history of the Roman Empire spans many centuries, \
@@ -130,7 +315,7 @@ so that hybrid scheduling stays out of the numbers:
 
 ---
 
-## 3. The investigation
+## 4. The investigation
 
 ### Step 0: Baseline (before any change)
 
@@ -262,11 +447,16 @@ thread was **still 16% slower** (25.0 against 29.9 tok/s).
 | Q6_K 2048 × 8192 (`ffn_down`), n = 64 | 78.2 ms | 70.5 |
 | **Q6_K 2048 × 8192, n = 93** | **71.6** | **137.8 (1.9× slower)** |
 
-**Characterization.** A batch above 64 tokens spans two tiles, and the 64-token
-tile **re-unpacked every chunk per tile**. Q6_K's unpack is expensive: the
-whole n = 1 gemv is 16–19 ms, almost all of it unpack. So the second tile
-doubled the cost. The old code also tiled, but its per-block unpack was small
-enough not to matter.
+**Characterization.** In the kernel benchmark, a batch above 64 tokens spans
+two tiles, and the 64-token tile **re-unpacked every chunk per tile**. Q6_K's
+unpack is expensive: the whole n = 1 gemv is 16–19 ms, almost all of it
+unpack. So the second tile doubled the cost.
+
+*Correction, made while writing §2.3.* End to end, `llama_decode` prefills in
+batches of at most 64 tokens, so the 93-token prompt ran as 64 + 29 and never
+crossed a tile boundary. The tile re-unpack therefore explains this kernel
+benchmark, not the end-to-end loss. The fix below was kept: it removes the
+cliff for `-b` above 64 and costs nothing.
 
 **Fix 1: accumulate in `y`, with no token tile.** Each chunk is unpacked once
 per row, then dotted with every token, accumulating directly into
@@ -274,11 +464,11 @@ per row, then dotted with every token, accumulating directly into
 at 0.0f and adds chunk dots in chunk order, so G1 holds by construction.
 
 Q6_K at n = 93 improved only to 120 ms. **Characterization, part 2:
-locality.**
+locality.** This part *does* apply to the end-to-end runs (see §2.4).
 - The old block-major loop touched one 512 B activation block per token per
-  weight block. For 93 tokens that is about 47 KB, which fits the 48 KiB L1.
-- A 1024-element chunk is 2 KB of activations per token. For 93 tokens that
-  is 186 KB, which spills to L2 on every row.
+  weight block. For 64 tokens that is 32 KiB, which fits the 48 KiB L1.
+- A 1024-element chunk is 2 KiB of activations per token. For 64 tokens that
+  is 128 KiB, which spills to L2 on every row.
 
 **Fix 2: rows × tokens tiling.** Chunk c of R consecutive weight rows is
 unpacked first; each token's activation chunk is then dotted against all R
@@ -476,7 +666,7 @@ R = 1 by about 10% on prefill; the single-token case stays untiled.
 
 ---
 
-## 4. Results
+## 5. Results
 
 The final configuration:
 - MTL5 v5.20.0 as released;
@@ -517,7 +707,7 @@ and NEON builds.
 
 ---
 
-## 5. Lessons
+## 6. Lessons
 
 1. **A faster primitive does not guarantee a faster kernel.** Restructuring a
    loop around a new primitive moves costs around. Here the old per-block
@@ -530,9 +720,12 @@ and NEON builds.
    and other v5.20.0 changes could have been blamed.
 4. **Microbenchmarks need compiler barriers.** A pure function with constant
    inputs gets hoisted out of the timing loop, giving a reading of 0.4 ns.
-5. **Benchmark the shapes you run.** 2048 × 2048 at n = 32 said "faster". The
-   model's 2048 × 8192 Q6_K at n = 93 was 1.9× slower, because of a tile
-   boundary at 64 tokens.
+5. **Benchmark the shapes *and batch sizes* you run.** 2048 × 2048 at n = 32
+   said "faster", while the model's 2048 × 8192 Q6_K was slower. The n = 93
+   kernel benchmark then exposed a 64-token tile cliff that the end-to-end
+   runs, batched at 64, never hit (§2.3). Knowing the workload's real
+   parameters, including how the application batches its input, tells you
+   which kernel results matter.
 6. **Profile before tuning further.** Six timing experiments converged
    slowly. Two hardware-counter passes (`perf stat` for the shape of the
    problem, `perf record` and `perf annotate` for its location) found both
@@ -543,7 +736,7 @@ and NEON builds.
 
 ---
 
-## 6. Appendix: command reference
+## 7. Appendix: command reference
 
 ```bash
 # --- enable / restore hardware performance counters (needs root) ---------------
