@@ -55,8 +55,12 @@ option(SYNAPSE_SHOW_DEP_WARNINGS "Treat MTL5/Universal headers as non-system (sh
 set(SYNAPSE_MTL5_VERSION      5.20.0)
 set(SYNAPSE_UNIVERSAL_VERSION 5.11.0)
 
+# An installed MTL5 must be at least the pinned version (MTL5's package is
+# SameMajorVersion-compatible, so any 5.x >= the pin is accepted). A target a
+# parent project provides is checked at compile time instead, by the
+# static_assert in kernels/dot.hpp.
 if(NOT TARGET MTL5::mtl5)
-    find_package(MTL5 CONFIG QUIET)
+    find_package(MTL5 ${SYNAPSE_MTL5_VERSION} CONFIG QUIET)
 endif()
 if(TARGET MTL5::mtl5)
     if(MTL5_FOUND)

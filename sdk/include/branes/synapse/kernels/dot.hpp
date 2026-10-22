@@ -35,11 +35,18 @@
 #include <branes/synapse/quant/scheme.hpp>
 
 #include <mtl/simd/algorithm.hpp>
+#include <mtl/version.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+
+// simd::reduce_dot_block_scaled arrived in MTL5 5.20.0. Checked here as well
+// as in cmake/deps.cmake, so an older MTL5 supplied by a parent project fails
+// with this message rather than deep inside a kernel.
+static_assert(MTL5_VERSION_MAJOR > 5 || (MTL5_VERSION_MAJOR == 5 && MTL5_VERSION_MINOR >= 20),
+              "synapse requires MTL5 >= 5.20.0 (mtl::simd::reduce_dot_block_scaled)");
 
 namespace branes::synapse::kernels {
 
