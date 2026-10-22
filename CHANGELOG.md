@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/branes-ai/synapse/compare/v0.7.0...v0.8.0) (2026-10-22)
+
+
+### Features
+
+* **graph:** multithreaded runs on mtl5's thread pool, bit-identical for any thread count ([#22](https://github.com/branes-ai/synapse/issues/22)) ([0a93916](https://github.com/branes-ai/synapse/commit/0a9391692ed248e8371d9d646821c468dab7fe07))
+
 ## [0.7.0](https://github.com/branes-ai/synapse/compare/v0.6.1...v0.7.0) (2026-10-22)
 
 
