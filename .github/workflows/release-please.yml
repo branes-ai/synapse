@@ -42,10 +42,15 @@ jobs:
 
       - name: Merge the release PR
         if: ${{ steps.release.outputs.prs_created == 'true' }}
+        # Parse the PR in the shell: env is evaluated even when the step is
+        # skipped, and fromJSON fails on the empty output of a run that
+        # opened no release PR.
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
-        run: gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --squash --delete-branch
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        run: |
+          gh pr merge "$(jq -r .number <<<"$PR_JSON")" \
+            --repo "$GITHUB_REPOSITORY" --squash --delete-branch
 
       - name: Tag and publish the release
         if: ${{ steps.release.outputs.prs_created == 'true' }}

@@ -1,8 +1,14 @@
 name: commitlint
 
 on:
+  # The release PR touches only these two files and is opened by
+  # github-actions[bot], whose runs wait for approval; it merges at once, so
+  # those runs would only expire and show red.
   pull_request:
     types: [opened, edited, synchronize, reopened]
+    paths-ignore:
+      - CHANGELOG.md
+      - .release-please-manifest.json
   push:
     branches: [main]
 
