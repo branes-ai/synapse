@@ -58,7 +58,7 @@ The token is at position `p` (0 for the first token of the sequence). Shapes are
 RMSNorm(x) = x / sqrt(mean(x²) + ε) ⊙ g        ε = 1e-5, g a learned 2048-vector
 ```
 
-This rescales the residual stream to unit root-mean-square before each sub-block reads it.
+This divides the residual stream by its root-mean-square, then applies the learned per-channel scale `g`, before each sub-block reads it. The result therefore has the scale `g` gives it, not unit RMS.
 
 synapse: `kernels::rms_norm` (`kernels/elementwise.hpp`), which accumulates the sum of squares in double as ggml's `ggml_compute_forward_rms_norm_f32` does (`ggml_float`).
 
@@ -166,9 +166,15 @@ synapse returns the logits; `tools/llama_decode` takes their argmax (greedy deco
 A prompt is processed in batches. Every activation becomes a matrix of `n` tokens × width:
 - **The matrix–vector products become matrix–matrix products** (`kernels::gemm`). Each weight block is read and unpacked once per batch instead of once per token.
 - **RMSNorm, RoPE and attention work per token.** Token `i` of the batch is at position `p+i`, and its attention covers cache rows `0..p+i`, so causality holds inside the batch too.
-- **Only the last token's logits** are computed (`graph_builder::last_row`), as llama.cpp does for a prompt.
+- **synapse computes only the last token's logits** (`graph_builder::last_row`). That is llama.cpp's default when the batch carries no output mask (`batch.logits`, `src/llama-batch.cpp`). llama.cpp can also return logits for every token of the batch or for selected ones.
 
-synapse's contract G1 makes each gemm row perform exactly gemv's operations. Prefilling a prompt therefore gives bit-for-bit the logits and KV cache of decoding it token by token (`tests/sdk/llama_prefill.cpp`).
+synapse's contract G1 makes each gemm row perform exactly gemv's operations, and the per-token kernels run in token order. So by construction, prefilling a prompt gives the same logits and KV cache as decoding it token by token.
+
+`tests/sdk/llama_prefill.cpp` checks this bit for bit on the tiny llama.cpp-generated fixtures:
+- the logits after a single batch and after uneven chunks;
+- tokens decoded after a prefill. Those read the cache the prefill wrote, so this checks the cache indirectly; the test does not compare the cache tensors themselves.
+
+The opt-in real-model test (`tests/sdk/llama_model.cpp`) checks the same for each real model tested.
 
 ## 5. What it costs
 
@@ -193,12 +199,12 @@ Per decode token, from [assessments/block-scaled-dot-performance.md §2.2](asses
 
 ## 6. The family: Llama, Qwen2, Mistral
 
-synapse builds all of these through the same graph (`models/llama.hpp`). The differences are where llama.cpp's builders differ:
+synapse builds all of these through the same graph (`models/llama.hpp`). The differences are where llama.cpp's builders differ. The values are those of the models tested; each file's own metadata is what synapse reads.
 
 | | Llama 3 | Qwen2 / Qwen2.5 | Mistral 7B, Nemo | Ministral 3 (`mistral3`) |
 |---|---|---|---|---|
 | RoPE pairs | normal | NEOX | normal | normal |
-| RoPE schedule | base 500,000 with **frequency factors** | base 1,000,000 | base 1,000,000 | **YaRN** (factor 16) |
+| RoPE schedule | base 500,000 with **frequency factors** | base 1,000,000 | base 1,000,000 (v0.2, v0.3, Nemo); 10,000 (v0.1) | **YaRN** (factor 16) |
 | biases | none | Q, K, V (and optional output) | none | optional on Q, K, V, O and the FFN |
 | attention temperature | none | none | none | Q scaled by `1 + 0.1·ln(⌊p/16384⌋ + 1)` |
 | tokenizer | BPE, `llama-bpe` | BPE, `qwen2` | SPM (7B); BPE `tekken` (Nemo) | BPE, `tekken` |

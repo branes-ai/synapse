@@ -53,7 +53,10 @@ The platform repos are organized after the nervous system:
 
 The core idea is a clean division of responsibilities:
 
-- **GGML is an ML environment.** It is a file format (GGUF), a DAG execution scheduler, and a static memory planner. Its model ecosystem (Llama, Phi, Mistral, Qwen, LLaVA, and custom policy networks, all quantized and distributed as `.gguf`) is the reason to be compatible with it. [docs/ggml-ecosystem.md](docs/ggml-ecosystem.md) describes how it is put together, and [docs/llama-model.md](docs/llama-model.md) what a Llama-family model computes.
+- **The GGML ecosystem is an ML environment.**
+  - **ggml** is a tensor library with a DAG execution scheduler and a static memory planner.
+  - **GGUF** is its model container format.
+  - **Its model ecosystem** (Llama, Phi, Mistral, Qwen, LLaVA, and custom policy networks, distributed as `.gguf` in full precision and quantized variants) is the reason to be compatible with it. [docs/ggml-ecosystem.md](docs/ggml-ecosystem.md) describes how it is put together, and [docs/llama-model.md](docs/llama-model.md) what a Llama-family model computes.
 - **MTL5 is a math engine.** It provides C++20 concepts, expression templates, layout traits, vectorization, and number systems beyond IEEE floats through [Universal](https://github.com/stillwater-sc/universal) (posits, intervals, mixed precision, hardware-aligned types).
 
 `synapse` reimplements the ML-environment half in modern C++20 and delegates the math to MTL5. The result reads GGML artifacts unchanged without carrying GGML's C code, `void*` dispatch, or `switch (ggml_type)` kernels.
