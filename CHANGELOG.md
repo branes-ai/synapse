@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/branes-ai/synapse/compare/v0.11.0...v0.11.1) (2026-10-23)
+
+
+### Continuous Integration
+
+* stop release PRs leaving expired and failed runs ([#42](https://github.com/branes-ai/synapse/issues/42)) ([22f7ba6](https://github.com/branes-ai/synapse/commit/22f7ba68d4809c5f4407140359f801dbb19e83bc))
+
 ## [0.11.0](https://github.com/branes-ai/synapse/compare/v0.10.1...v0.11.0) (2026-10-23)
 
 
