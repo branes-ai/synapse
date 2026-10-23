@@ -1,12 +1,16 @@
 // Unit tests for the activation quantizers, float_to_fp16, and gemv on plain
-// formats, with expected values that follow from the format definitions.
+// formats, with expected values that follow from the format definitions; and
+// MTL5's mult dispatching to gemv through mtl::block_kernels.
 
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/q8.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include "../support/random_weights.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <mtl/mat/block_matrix_view.hpp>
+#include <mtl/vec/dense_vector.hpp>
 #include <universal/number/cfloat/cfloat.hpp>
 
 #include <bit>
@@ -24,6 +28,37 @@ using quant::tensor_type;
 namespace {
 
 using binary16 = sw::universal::cfloat<16, 5, std::uint16_t, true, false, false>;  // IEEE-754 binary16 layout
+
+// mtl::mult on a synapse view runs kernels::gemv: same bits, with the
+// caller's scratch and with the scratch mult allocates.
+template <tensor_type T>
+void check_mult_is_gemv(std::size_t rows, std::size_t cols) {
+    using S = quant::scheme<T>;
+    STATIC_REQUIRE(mtl::BlockGemvScheme<S>);
+    STATIC_REQUIRE(mtl::block_gemv_scratch_alignment<S> == kernels::gemv_scratch_alignment);
+    std::mt19937 rng(static_cast<unsigned>(rows * 17 + cols));
+    const synapse_test::random_matrix<T> w(rows, cols, rng);
+    std::normal_distribution<float> normal(0.0f, 1.0f);
+    mtl::vec::dense_vector<float> x(cols);
+    for (std::size_t i = 0; i < cols; ++i) {
+        x(i) = normal(rng);
+    }
+
+    std::vector<float> expected(rows);
+    std::vector<std::byte> scratch(kernels::gemv_scratch_bytes<S>(cols));
+    kernels::gemv(w.view(), std::span<const float>(x.data(), cols), expected, scratch);
+
+    CHECK(mtl::block_gemv_scratch_bytes<S>(cols) == scratch.size());
+    mtl::vec::dense_vector<float> y(rows);
+    mtl::mult(w.view(), x, y, scratch);
+    mtl::vec::dense_vector<float> y_alloc(rows);
+    mtl::mult(w.view(), x, y_alloc);
+    for (std::size_t r = 0; r < rows; ++r) {
+        INFO("row " << r);
+        CHECK(std::bit_cast<std::uint32_t>(y(r)) == std::bit_cast<std::uint32_t>(expected[r]));
+        CHECK(std::bit_cast<std::uint32_t>(y_alloc(r)) == std::bit_cast<std::uint32_t>(expected[r]));
+    }
+}
 
 }  // namespace
 
@@ -135,10 +170,18 @@ TEST_CASE("kernels: plain-format gemv is an exact float matvec", "[kernels]") {
     }
     std::vector<std::byte> bytes(w.size() * sizeof(std::uint16_t));
     std::memcpy(bytes.data(), w.data(), bytes.size());
-    const quantized_matrix_view<quant::scheme<tensor_type::f16>> view(bytes, rows, cols);
+    const mtl::mat::block_matrix_view<quant::scheme<tensor_type::f16>> view(rows, cols, bytes);
     std::vector<float> y(rows);
     kernels::gemv(view, x, y, {});
     for (std::size_t r = 0; r < rows; ++r) {
         CHECK(static_cast<double>(y[r]) == expected[r]);
     }
+}
+
+TEST_CASE("kernels: mtl::mult on a synapse view is gemv bit for bit", "[kernels]") {
+    check_mult_is_gemv<tensor_type::q4_0>(37, 512);
+    check_mult_is_gemv<tensor_type::q8_0>(37, 512);
+    check_mult_is_gemv<tensor_type::q4_k>(19, 512);
+    check_mult_is_gemv<tensor_type::q6_k>(19, 512);
+    check_mult_is_gemv<tensor_type::f16>(23, 600);
 }

@@ -4,7 +4,8 @@
 
 #include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -54,8 +55,8 @@ struct random_matrix {
         }
     }
 
-    branes::synapse::quantized_matrix_view<scheme> view() const {
-        return {data, rows, cols};
+    mtl::mat::block_matrix_view<scheme> view() const {
+        return {rows, cols, data};
     }
 };
 

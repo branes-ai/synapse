@@ -14,6 +14,9 @@
 /// vec_dot_type, except that plain formats keep float activations where ggml
 /// rounds them to the weight format.
 ///
+/// Every scheme is also an MTL5 BlockScheme (`block_bytes`, `decode`), so
+/// mtl::mat::block_matrix_view<S> is the matrix view over its bytes.
+///
 /// `scheme<T>` is only defined for the formats synapse can decode; `has_scheme`
 /// tests that. Each specialization is checked against tensor_type_traits, so
 /// the block geometry the parser validated and the geometry the decoder
@@ -23,6 +26,8 @@
 #include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/blocks.hpp>
 #include <branes/synapse/quant/q8.hpp>
+
+#include <mtl/concepts/block_scheme.hpp>
 
 #include <concepts>
 #include <cstddef>
@@ -55,9 +60,13 @@ struct block_scheme {
     static constexpr tensor_type type = T;
     static constexpr std::size_t block_size = BlockSize;
     static constexpr std::size_t type_size = sizeof(Block);
+    static constexpr std::size_t block_bytes = type_size;
 
     static void dequantize(const std::byte* src, float* dst) noexcept {
         quant::dequantize(load_block<Block>(src), dst);
+    }
+    static void decode(const std::byte* src, float* dst) noexcept {
+        dequantize(src, dst);
     }
 };
 
@@ -70,9 +79,13 @@ struct scheme<tensor_type::f32> {
     static constexpr tensor_type type = tensor_type::f32;
     static constexpr std::size_t block_size = 1;
     static constexpr std::size_t type_size = sizeof(float);
+    static constexpr std::size_t block_bytes = type_size;
 
     static void dequantize(const std::byte* src, float* dst) noexcept {
         std::memcpy(dst, src, sizeof(float));
+    }
+    static void decode(const std::byte* src, float* dst) noexcept {
+        dequantize(src, dst);
     }
 };
 
@@ -83,9 +96,13 @@ struct scheme<tensor_type::f16> {
     static constexpr tensor_type type = tensor_type::f16;
     static constexpr std::size_t block_size = 1;
     static constexpr std::size_t type_size = sizeof(std::uint16_t);
+    static constexpr std::size_t block_bytes = type_size;
 
     static void dequantize(const std::byte* src, float* dst) noexcept {
         *dst = fp16_to_float(detail::load_block<std::uint16_t>(src));
+    }
+    static void decode(const std::byte* src, float* dst) noexcept {
+        dequantize(src, dst);
     }
 };
 
@@ -96,9 +113,13 @@ struct scheme<tensor_type::bf16> {
     static constexpr tensor_type type = tensor_type::bf16;
     static constexpr std::size_t block_size = 1;
     static constexpr std::size_t type_size = sizeof(std::uint16_t);
+    static constexpr std::size_t block_bytes = type_size;
 
     static void dequantize(const std::byte* src, float* dst) noexcept {
         *dst = bf16_to_float(detail::load_block<std::uint16_t>(src));
+    }
+    static void decode(const std::byte* src, float* dst) noexcept {
+        dequantize(src, dst);
     }
 };
 
@@ -111,16 +132,18 @@ struct scheme<tensor_type::q4_k> : detail::block_scheme<block_q4_k, tensor_type:
 template <>
 struct scheme<tensor_type::q6_k> : detail::block_scheme<block_q6_k, tensor_type::q6_k, qk_k, block_q8_k> {};
 
-/// A storage format: block type, geometry, and a block dequantizer.
+/// A storage format: block type, geometry, and a block dequantizer. It
+/// refines mtl::BlockScheme, with block_bytes == type_size and decode the
+/// same function as dequantize.
 template <typename S>
-concept Scheme = requires(const std::byte* src, float* dst) {
+concept Scheme = mtl::BlockScheme<S> && requires(const std::byte* src, float* dst) {
     typename S::block_type;
     typename S::vec_dot_block;
     { S::type } -> std::convertible_to<tensor_type>;
     { S::block_size } -> std::convertible_to<std::size_t>;
     { S::type_size } -> std::convertible_to<std::size_t>;
     S::dequantize(src, dst);
-} && sizeof(typename S::block_type) == S::type_size && S::block_size > 0;
+} && sizeof(typename S::block_type) == S::type_size && S::block_bytes == S::type_size && S::block_size > 0;
 
 /// True if synapse can decode tensors of type T.
 template <tensor_type T>

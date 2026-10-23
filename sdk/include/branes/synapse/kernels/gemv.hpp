@@ -7,7 +7,8 @@
 /// a fused dot of one encoded weight row with those activations (see dot.hpp).
 /// The quantized activations live in caller-provided scratch memory, so a
 /// static memory planner can place them; gemv itself never allocates and
-/// never throws.
+/// never throws. It is also MTL5's fused kernel for synapse's schemes
+/// (mtl::block_kernels, below), so mtl::mult on their views runs it.
 ///
 /// Accuracy: against the float reference dequantize(W) . x, the only extra
 /// error is the rounding of x to 8 bits (relative ~1/254 per element for
@@ -17,7 +18,8 @@
 #include <branes/synapse/kernels/dot.hpp>
 #include <branes/synapse/quant/q8.hpp>
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <cassert>
 #include <cstddef>  // std::max_align_t
@@ -123,25 +125,44 @@ constexpr std::size_t gemv_scratch_bytes(std::size_t cols) noexcept {
 
 /// y = W x.
 ///
-///   Pre:  x.size() == w.cols(), y.size() == w.rows(),
-///         scratch.size() >= gemv_scratch_bytes<S>(w.cols()), and scratch is
+///   Pre:  x.size() == w.num_cols(), y.size() == w.num_rows(),
+///         scratch.size() >= gemv_scratch_bytes<S>(w.num_cols()), and scratch is
 ///         aligned to gemv_scratch_alignment; x and y do not overlap scratch.
 ///   Post: y[r] == row_dot(row r of w, activations(x)) for every r; scratch
 ///         holds the quantized activation blocks (ggml's Q8_0 / Q8_K layout)
 ///         followed by their int16-widened quants.
 template <quant::Scheme S>
-void gemv(const quantized_matrix_view<S>& w,
+void gemv(const mtl::mat::block_matrix_view<S>& w,
           std::span<const float> x,
           std::span<float> y,
           std::span<std::byte> scratch) noexcept {
-    assert(x.size() == w.cols() && y.size() == w.rows());                                    // Pre
-    assert(scratch.size() >= gemv_scratch_bytes<S>(w.cols()));                               // Pre
+    assert(x.size() == w.num_cols() && y.size() == w.num_rows());                            // Pre
+    assert(scratch.size() >= gemv_scratch_bytes<S>(w.num_cols()));                           // Pre
     assert(reinterpret_cast<std::uintptr_t>(scratch.data()) % gemv_scratch_alignment == 0);  // Pre
 
     const auto act = detail::prepare_activations<typename S::vec_dot_block>(x, scratch);
-    for (std::size_t r = 0; r < w.rows(); ++r) {
-        y[r] = row_dot<S>(w.row_bytes(r).data(), act, w.blocks_per_row());
+    for (std::size_t r = 0; r < w.num_rows(); ++r) {
+        y[r] = row_dot<S>(w.row(r).data(), act, w.blocks_per_row());
     }
 }
 
 }  // namespace branes::synapse::kernels
+
+/// MTL5's fused mat-vec hook for synapse's schemes: mtl::mult(w, x, y,
+/// scratch) on a block_matrix_view of a synapse scheme runs kernels::gemv.
+///
+///   Pre:  as kernels::gemv, with x of w.num_cols() and y of w.num_rows() floats
+///         (mult checks the scratch size and alignment).
+///   Post: y equals kernels::gemv's output bit for bit.
+template <branes::synapse::quant::Scheme S>
+struct mtl::block_kernels<S> {
+    static void
+    gemv(const mtl::mat::block_matrix_view<S>& w, const float* x, float* y, std::span<std::byte> scratch) noexcept {
+        branes::synapse::kernels::gemv(
+            w, std::span<const float>(x, w.num_cols()), std::span<float>(y, w.num_rows()), scratch);
+    }
+    static std::size_t scratch_bytes(std::size_t cols) noexcept {
+        return branes::synapse::kernels::gemv_scratch_bytes<S>(cols);
+    }
+    static constexpr std::size_t scratch_alignment = branes::synapse::kernels::gemv_scratch_alignment;
+};
