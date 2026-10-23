@@ -250,8 +250,8 @@ Detokenization concatenates each token's text, with the byte map or the `▁` es
 
 ### Where llama.cpp rounds
 
-On the path synapse implements (CPU, flash attention off, F16 KV cache), llama.cpp rounds at fixed points. synapse rounds at the same ones:
-- **Activations of a quantized matrix product** are rounded to 8 bits (Q8_0 or Q8_K) before the integer dot. Plain float weight formats keep float activations: ggml converts them to the weight's format, so they are rounded to F16 for F16 weights and to BF16 for BF16 weights, and stay exact for F32 weights.
+On the path synapse implements (CPU, flash attention off, F16 KV cache), llama.cpp rounds at fixed points. synapse rounds at the same ones, with one exception noted in the first item:
+- **Activations of a quantized matrix product** are rounded to 8 bits (Q8_0 or Q8_K) before the integer dot. Plain float weight formats keep float activations: ggml converts them to the weight's format, so they are rounded to F16 for F16 weights and to BF16 for BF16 weights, and stay exact for F32 weights. synapse does not do that rounding: it dots F16 and BF16 weights, decoded to float, with the float activations (`kernels/dot.hpp`, `plain_kernel`). The two agree exactly only for F32 weights.
 - **K and V** are stored in the cache as F16.
 - **q** is rounded to F16 before the q·k dot, because ggml's F16 matrix product converts its F32 operand.
 - **The softmax probabilities** are rounded to F16 before they weight V.
