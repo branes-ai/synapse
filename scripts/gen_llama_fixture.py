@@ -14,6 +14,12 @@ Usage:
   python3 scripts/gen_llama_fixture.py --llama-cpp /path/to/llama.cpp \\
       [--build-dir DIR] tiny-f32 tests/data/llama_tiny_f32.gguf tests/data/llama_tiny_f32_golden.gguf
 
+  # the Qwen2 versions of both (NEOX RoPE, Q/K/V and output biases)
+  python3 scripts/gen_llama_fixture.py --llama-cpp /path/to/llama.cpp \\
+      [--build-dir DIR] qwen2-tiny tests/data/qwen2_tiny.gguf tests/data/qwen2_tiny_golden.gguf
+  python3 scripts/gen_llama_fixture.py --llama-cpp /path/to/llama.cpp \\
+      [--build-dir DIR] qwen2-tiny-f32 tests/data/qwen2_tiny_f32.gguf tests/data/qwen2_tiny_f32_golden.gguf
+
   # golden logits of a real model, for the opt-in llama_model test
   python3 scripts/gen_llama_fixture.py --llama-cpp /path/to/llama.cpp \\
       [--build-dir DIR] logits model.gguf golden.gguf 128000 791 6864 315 9822 374
@@ -61,7 +67,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llama-cpp", required=True, type=Path, help="path to a llama.cpp checkout")
     ap.add_argument("--build-dir", type=Path, help="llama.cpp build directory (default: a temp dir)")
-    ap.add_argument("mode", choices=["tiny", "tiny-f32", "logits"])
+    ap.add_argument("mode", choices=["tiny", "tiny-f32", "qwen2-tiny", "qwen2-tiny-f32", "logits"])
     ap.add_argument("model", type=Path, help="model to write (tiny) or read (logits)")
     ap.add_argument("golden", type=Path, help="golden logits to write")
     ap.add_argument("tokens", nargs="*", type=int, help="token ids to decode (logits mode)")

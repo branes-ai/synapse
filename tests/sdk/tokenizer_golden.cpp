@@ -49,3 +49,13 @@ TEST_CASE("tokenizer_golden: SentencePiece encode and decode match llama.cpp on 
     const std::string dir = SYNAPSE_TEST_DATA_DIR;
     CHECK(synapse_test::check_tokenizer_golden(dir + "/spm_vocab.gguf", dir + "/spm_golden.gguf") >= 50);
 }
+
+// tests/data/qwen2_vocab.gguf is the synthetic vocabulary with Qwen2's
+// pre-tokenizer (tokenizer.ggml.pre = "qwen2": one digit per word, no
+// ignore_merges, no BOS), and qwen2_golden.gguf holds llama.cpp's
+// tokenizations of its Qwen2 test vectors plus synapse's BPE edge cases.
+TEST_CASE("tokenizer_golden: encode and decode match llama.cpp with the Qwen2 pre-tokenizer",
+          "[tokenizer][golden][qwen2]") {
+    const std::string dir = SYNAPSE_TEST_DATA_DIR;
+    CHECK(synapse_test::check_tokenizer_golden(dir + "/qwen2_vocab.gguf", dir + "/qwen2_golden.gguf") >= 50);
+}

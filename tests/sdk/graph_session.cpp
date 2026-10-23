@@ -334,3 +334,33 @@ TEST_CASE("graph_session: batched runs check size, positions, and every token", 
     CHECK(s.run(batch{std::span<const std::uint32_t>(ok, 2), 4}));        // positions 4, 5
     CHECK_FALSE(s.run(batch{std::span<const std::uint32_t>(ok, 2), 5}));  // 5 + 2 > 6
 }
+
+TEST_CASE("graph_session: add_bias adds the decoded bias to every row of the run", "[graph][session][bias]") {
+    std::mt19937 rng(31);
+    const random_matrix<tensor_type::f32> bias_f32(1, d, rng, 0.1f, 1.0f);
+    const random_matrix<tensor_type::q8_0> bias_q8(1, d, rng, 0.1f, 1.0f);
+    for (const matrix_ref& bias : {matrix_ref(bias_f32.view()), matrix_ref(bias_q8.view())}) {
+        graph_builder b(3);
+        const tensor_id x = b.input(d);
+        const tensor_id y = b.add_bias(x, bias);
+        b.output(y);
+        auto g = std::move(b).finalize();
+        REQUIRE(g);
+        session s{*g};
+        std::normal_distribution<float> normal(0.0f, 1.0f);
+        for (float& v : s.tensor(x)) {
+            v = normal(rng);
+        }
+        const std::vector<float> in(s.tensor(x).begin(), s.tensor(x).end());
+        const std::vector<std::uint32_t> tokens(2, 0);  // two of the three rows
+        REQUIRE(s.run(batch{tokens, 0}));
+        std::vector<float> decoded(d);
+        std::visit([&](const auto& v) { v.dequantize_row(0, decoded); }, bias);
+        const auto out = s.tensor(y);
+        for (std::size_t r = 0; r < tokens.size(); ++r) {
+            for (std::size_t i = 0; i < d; ++i) {
+                CHECK(out[r * d + i] == in[r * d + i] + decoded[i]);  // ggml_add: one float add
+            }
+        }
+    }
+}

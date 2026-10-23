@@ -282,3 +282,42 @@ TEST_CASE("graph_builder: rejects ops that mix batched and single-row tensors (I
         CHECK(std::move(b).finalize().error().code == graph_errc::too_large);
     }
 }
+
+TEST_CASE("graph_builder: add_bias takes a 1 x size bias and keeps its operand's batching", "[graph][bias]") {
+    std::mt19937 rng(9);
+    const random_matrix<tensor_type::f32> bias(1, 64, rng);
+    const random_matrix<tensor_type::f32> wide(1, 128, rng);
+    const random_matrix<tensor_type::f32> tall(2, 64, rng);
+    {
+        graph_builder b(4);
+        const tensor_id x = b.input(64);
+        const tensor_id y = b.add_bias(x, bias.view());
+        const tensor_id last = b.add_bias(b.last_row(y), bias.view());  // a single-row operand
+        b.output(last);
+        auto g = std::move(b).finalize();
+        REQUIRE(g);
+        CHECK(std::holds_alternative<op_add_bias>(g->nodes()[0]));
+        CHECK(operands(g->nodes()[0]) == std::vector<tensor_id>{x});
+        CHECK(g->tensors()[y].size == 64);
+        CHECK(g->tensors()[y].batched);           // I8
+        CHECK_FALSE(g->tensors()[last].batched);  // I8
+    }
+    for (const auto* bad : {&wide, &tall}) {
+        graph_builder b;
+        CHECK(b.add_bias(b.input(64), bad->view()) == invalid_tensor);  // I2
+        const auto g = std::move(b).finalize();
+        REQUIRE_FALSE(g);
+        CHECK(g.error().code == graph_errc::size_mismatch);
+    }
+}
+
+TEST_CASE("graph_builder: rope records its pairing mode", "[graph][attention]") {
+    graph_builder b;
+    const tensor_id x = b.input(64);
+    b.output(b.rope(x, 16, 1e6f));
+    b.output(b.rope(x, 16, 1e6f, {}, branes::synapse::kernels::rope_mode::neox));
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+    CHECK(std::get<op_rope>(g->nodes()[0]).mode == branes::synapse::kernels::rope_mode::normal);
+    CHECK(std::get<op_rope>(g->nodes()[1]).mode == branes::synapse::kernels::rope_mode::neox);
+}

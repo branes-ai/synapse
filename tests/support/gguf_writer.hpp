@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -55,11 +56,16 @@ using kv_fn = std::function<void(writer&)>;
 
 template <typename T>
 kv_fn kv(std::string_view key, value_type type, T v) {
-    return [=](writer& w) { w.put_string(key).put(static_cast<std::uint32_t>(type)).put(v); };
+    // Owned copies: a key built at run time must outlive the call.
+    return [key = std::string(key), type, v](writer& w) {
+        w.put_string(key).put(static_cast<std::uint32_t>(type)).put(v);
+    };
 }
 
 inline kv_fn kv_string(std::string_view key, std::string_view v) {
-    return [=](writer& w) { w.put_string(key).put(static_cast<std::uint32_t>(value_type::string)).put_string(v); };
+    return [key = std::string(key), v = std::string(v)](writer& w) {
+        w.put_string(key).put(static_cast<std::uint32_t>(value_type::string)).put_string(v);
+    };
 }
 
 struct tensor_spec {

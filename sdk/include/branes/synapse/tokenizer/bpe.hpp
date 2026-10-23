@@ -1,6 +1,6 @@
 #pragma once
 /// @file bpe.hpp
-/// @brief Byte-level BPE tokenization of Llama-3-family vocabularies, as llama.cpp does it.
+/// @brief Byte-level BPE tokenization of Llama-3 and Qwen2 vocabularies, as llama.cpp does it.
 ///
 /// encode(text):
 ///   1. Split out special tokens: every control, unknown or user-defined
@@ -8,9 +8,11 @@
 ///      first). Control and unknown tokens are only recognized with
 ///      parse_special; user-defined ones always are, as in Hugging Face's
 ///      tokenizers and llama.cpp.
-///   2. Pre-tokenize each remaining fragment into words (split_llama3).
-///   3. Spell each word's UTF-8 bytes with GPT-2's byte map. A word that is a
-///      token as a whole is that token (ignore_merges); otherwise apply the
+///   2. Pre-tokenize each remaining fragment into words (split_words, with
+///      the regex tokenizer.ggml.pre names: "llama-bpe" or "qwen2").
+///   3. Spell each word's UTF-8 bytes with GPT-2's byte map. For Llama 3, a
+///      word that is a token as a whole is that token (llama.cpp's
+///      ignore_merges, which it sets for Llama 3 only); otherwise apply the
 ///      merges, lowest rank first (ties: leftmost), until none applies, and
 ///      look each resulting piece up (a piece with no token falls back to its
 ///      single-character tokens).
@@ -25,7 +27,8 @@
 ///     ids_      : map text -> id   (a text listed twice maps to its last id)
 ///     ranks_    : map (left, right) -> merge rank
 ///     specials_ : ids of control / unknown / user-defined tokens, longest text first
-///     bos_, eos_: ids or no_token; add_bos_
+///     bos_, eos_: ids or no_token; add_bos_, add_eos_
+///     pre_      : the pre-tokenizer (Llama 3 or Qwen2)
 ///
 /// Invariants (established by from_gguf)
 /// ----------
@@ -76,11 +79,17 @@ public:
             return fail(tokenizer_errc::unsupported_model, "tokenizer.ggml.model");
         }
         const auto pre = f.get<std::string_view>("tokenizer.ggml.pre");
-        if (!pre || (*pre != "llama-bpe" && *pre != "llama3" && *pre != "llama-v3")) {
+        bpe_tokenizer t;
+        if (pre && (*pre == "llama-bpe" || *pre == "llama3" || *pre == "llama-v3")) {
+            t.pre_ = pre_style::llama3;
+            t.add_bos_ = true;
+        } else if (pre && *pre == "qwen2") {
+            t.pre_ = pre_style::qwen2;
+            t.add_bos_ = false;
+        } else {
             return fail(tokenizer_errc::unsupported_pre, "tokenizer.ggml.pre");
         }
 
-        bpe_tokenizer t;
         const gguf::array_value* tokens = f.get_array("tokenizer.ggml.tokens");
         if (tokens == nullptr) {
             return fail(tokenizer_errc::missing_key, "tokenizer.ggml.tokens");
@@ -267,7 +276,7 @@ private:
     void encode_text(std::string_view text, std::vector<std::uint32_t>& out) const {
         const std::vector<std::uint32_t> cpts = decode_utf8(text);
         std::size_t start = 0;
-        for (std::size_t len : split_llama3(cpts)) {
+        for (std::size_t len : split_words(cpts, pre_)) {
             // The word's bytes (re-encoded from its code points, so invalid
             // input reads as U+FFFD), each spelled as its byte-level character.
             std::string bytes;
@@ -285,9 +294,11 @@ private:
 
     /// BPE within one word: repeatedly merge the adjacent pair of lowest rank.
     void merge_word(const std::string& word, std::vector<std::uint32_t>& out) const {
-        if (const auto whole = id_of(word)) {  // ignore_merges
-            out.push_back(*whole);
-            return;
+        if (pre_ == pre_style::llama3) {  // ignore_merges
+            if (const auto whole = id_of(word)) {
+                out.push_back(*whole);
+                return;
+            }
         }
         // Symbols: one per character, as a linked list over byte ranges.
         struct symbol {
@@ -376,8 +387,9 @@ private:
     std::vector<std::uint32_t> specials_;
     std::uint32_t bos_ = no_token;
     std::uint32_t eos_ = no_token;
-    bool add_bos_ = true;  ///< llama.cpp's default for the llama3 pre-tokenizer
+    bool add_bos_ = true;  ///< llama.cpp's default per pre-tokenizer, unless the file says
     bool add_eos_ = false;
+    pre_style pre_ = pre_style::llama3;
 };
 
 }  // namespace branes::synapse::tokenizer

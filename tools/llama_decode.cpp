@@ -1,11 +1,11 @@
-// llama_decode — greedy decoding of a Llama-architecture GGUF model.
+// llama_decode — greedy decoding of a Llama-family (Llama, Qwen2) GGUF model.
 //
 //   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [-t <threads>]
 //                (-p <prompt text> | <token id>...)
 //
-// Tokenizes the prompt (-p; byte-level BPE for Llama 3 vocabularies,
-// SentencePiece for Llama 2 / TinyLlama ones; special tokens such as
-// <|eot_id|> or </s> in the text are recognized) or takes its token
+// Tokenizes the prompt (-p; byte-level BPE for Llama 3 and Qwen2
+// vocabularies, SentencePiece for Llama 2 / TinyLlama ones; special tokens
+// such as <|eot_id|>, <|im_end|> or </s> in the text are recognized) or takes its token
 // ids, prefills it in runs of up to -b tokens (default 64; -b 1 decodes the
 // prompt one token at a time, with the same result), then generates up to
 // -n more by taking the most likely next token each step, stopping at the
@@ -242,8 +242,9 @@ int main(int argc, char** argv) {
     const auto& c = model->config;
     graph::session s{model->graph, 0};
     std::fprintf(stderr,
-                 "llama: %zu layers, d=%zu, ff=%zu, %zu heads (%zu KV), vocab %zu\n"
+                 "%s: %zu layers, d=%zu, ff=%zu, %zu heads (%zu KV), vocab %zu\n"
                  "memory: arena %.1f KiB for batches of %zu, KV cache %.1f MiB for %zu positions; %u threads\n",
+                 std::string(models::to_string(c.arch)).c_str(),
                  c.n_layer,
                  c.n_embd,
                  c.n_ff,

@@ -184,6 +184,40 @@ TEST_CASE("tokenizer_bpe: rejects vocabularies it cannot tokenize correctly", "[
     }
 }
 
+TEST_CASE("tokenizer_bpe: the Qwen2 pre-tokenizer", "[tokenizer][bpe][qwen2]") {
+    // "abc" is a token, but no merge builds it from "ab" + "c".
+    vocab_spec spec;
+    spec.tokens.insert(spec.tokens.end() - 1, "abc");  // id 257; <s> moves to 258
+    spec.keys["tokenizer.ggml.bos_token_id"] =
+        kv("tokenizer.ggml.bos_token_id", value_type::uint32, std::uint32_t{258});
+    std::vector<std::int32_t> types(spec.tokens.size(), 1);
+    types.back() = 3;
+    spec.keys["tokenizer.ggml.token_type"] = int32_array("tokenizer.ggml.token_type", types);
+    std::vector<std::byte> keep_llama3, keep_qwen2;
+    const auto llama3 = load(spec, keep_llama3);
+    REQUIRE(llama3);
+    spec.keys["tokenizer.ggml.pre"] = kv_string("tokenizer.ggml.pre", "qwen2");
+    const auto qwen2 = load(spec, keep_qwen2);
+    REQUIRE(qwen2);
+
+    CHECK_FALSE(qwen2->adds_bos());                                       // llama.cpp's default for qwen2
+    CHECK(qwen2->encode("abc") == std::vector<std::uint32_t>{256, 'c'});  // merges only
+    CHECK(llama3->encode("abc", {.add_special = false}) == std::vector<std::uint32_t>{257});  // ignore_merges
+    // One digit per word (Llama 3: runs of up to three), so no merge spans digits.
+    CHECK(qwen2->encode("1234") == std::vector<std::uint32_t>{'1', '2', '3', '4'});
+    CHECK(qwen2->decode(qwen2->encode("x 1234 abc")) == "x 1234 abc");
+    {
+        vocab_spec with_bos;  // the file's flag still wins
+        with_bos.keys["tokenizer.ggml.pre"] = kv_string("tokenizer.ggml.pre", "qwen2");
+        with_bos.keys["tokenizer.ggml.add_bos_token"] =
+            kv("tokenizer.ggml.add_bos_token", value_type::boolean, std::uint8_t{1});
+        std::vector<std::byte> keep;
+        const auto t = load(with_bos, keep);
+        REQUIRE(t);
+        CHECK(t->adds_bos());
+    }
+}
+
 TEST_CASE("tokenizer_bpe: decode(encode(s)) == s for random valid UTF-8 (T2)", "[tokenizer][bpe]") {
     std::mt19937 rng(31);
     // Draw from ASCII, Latin-1, CJK, emoji and whitespace, weighted to ASCII.

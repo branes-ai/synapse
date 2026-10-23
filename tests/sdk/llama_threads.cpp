@@ -32,7 +32,8 @@ unsigned pool_threads() {
 TEST_CASE("llama_threads: decoding and prefill are bit-identical for any thread count (D1)", "[llama][threads]") {
     const unsigned pool = pool_threads();
     INFO("pool of " << pool << " threads");
-    const std::string name = GENERATE(std::string("llama_tiny"), std::string("llama_tiny_f32"));
+    const std::string name =
+        GENERATE(std::string("llama_tiny"), std::string("llama_tiny_f32"), std::string("qwen2_tiny"));
     const std::string dir = SYNAPSE_TEST_DATA_DIR;
     const auto files = synapse_test::open_golden(dir + "/" + name + ".gguf", dir + "/" + name + "_golden.gguf");
     const auto& tokens = files->tokens;

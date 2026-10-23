@@ -9,6 +9,11 @@ Two modes:
   python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
       [--build-dir DIR] synthetic tests/data/bpe_vocab.gguf tests/data/bpe_golden.gguf
 
+  # the same vocabulary with Qwen2's pre-tokenizer (single-digit numbers, no
+  # ignore_merges, no BOS), checked on llama.cpp's Qwen2 test vectors
+  python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
+      [--build-dir DIR] --pre qwen2 --cases qwen2 synthetic tests/data/qwen2_vocab.gguf tests/data/qwen2_golden.gguf
+
   # golden tokenizations for an existing vocabulary (e.g. llama.cpp's
   # models/ggml-vocab-llama-bpe.gguf, or a full model), for the opt-in test
   python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
@@ -20,7 +25,7 @@ Two modes:
       [--build-dir DIR] --cases spm golden tests/data/spm_vocab.gguf tests/data/spm_golden.gguf
 
 The test cases are llama.cpp's own tokenizer test vectors
-(models/ggml-vocab-llama-{bpe,spm}.gguf.inp, per --cases) followed by
+(models/ggml-vocab-{llama-bpe,llama-spm,qwen2}.gguf.inp, per --cases) followed by
 synapse's additional edge cases for that tokenizer family. The pre-tokenizer's behaviour does not depend on the vocabulary, so
 the small vocabulary exercises it fully; the merges exercise BPE.
 """
@@ -141,7 +146,7 @@ def gpt2_bytes_to_unicode() -> dict[int, str]:
     return out
 
 
-def write_vocab(llama: Path, path: Path) -> None:
+def write_vocab(llama: Path, path: Path, pre: str) -> None:
     sys.path.insert(0, str(llama / "gguf-py"))
     import gguf  # noqa: PLC0415 (from the llama.cpp checkout)
 
@@ -158,7 +163,7 @@ def write_vocab(llama: Path, path: Path) -> None:
         types.append(ty)
 
     w = gguf.GGUFWriter(str(path), "llama")
-    w.add_name("synapse synthetic llama-bpe vocab")
+    w.add_name(f"synapse synthetic {pre} vocab")
     for key, val in [("block_count", 1), ("context_length", 128), ("embedding_length", 64),
                      ("feed_forward_length", 128), ("attention.head_count", 4), ("attention.head_count_kv", 4),
                      ("rope.dimension_count", 16), ("vocab_size", len(tokens))]:
@@ -166,7 +171,7 @@ def write_vocab(llama: Path, path: Path) -> None:
     w.add_float32("llama.rope.freq_base", 500000.0)
     w.add_float32("llama.attention.layer_norm_rms_epsilon", 1e-5)
     w.add_tokenizer_model("gpt2")
-    w.add_tokenizer_pre("llama-bpe")
+    w.add_tokenizer_pre(pre)
     w.add_token_list(tokens)
     w.add_token_types(types)
     w.add_token_merges([f"{a} {b}" for a, b in merges])
@@ -179,10 +184,14 @@ def write_vocab(llama: Path, path: Path) -> None:
     print(f"wrote {path}: {len(tokens)} tokens, {len(merges)} merges")
 
 
+UPSTREAM_CASES = {"bpe": "ggml-vocab-llama-bpe.gguf.inp", "spm": "ggml-vocab-llama-spm.gguf.inp",
+                  "qwen2": "ggml-vocab-qwen2.gguf.inp"}
+
+
 def cases_file(llama: Path, directory: Path, family: str) -> Path:
-    upstream = (llama / "models" / f"ggml-vocab-llama-{family}.gguf.inp").read_bytes()
+    upstream = (llama / "models" / UPSTREAM_CASES[family]).read_bytes()
     # Lone surrogates above stand for raw invalid bytes.
-    cases = EXTRA_CASES if family == "bpe" else SPM_EXTRA_CASES
+    cases = SPM_EXTRA_CASES if family == "spm" else EXTRA_CASES
     extra = b"".join(c.encode("utf-8", "surrogateescape") + SEPARATOR.encode() for c in cases)
     path = directory / "cases.txt"
     path.write_bytes(upstream + extra)
@@ -193,8 +202,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llama-cpp", required=True, type=Path, help="path to a llama.cpp checkout")
     ap.add_argument("--build-dir", type=Path, help="llama.cpp build directory (default: a temp dir)")
-    ap.add_argument("--cases", choices=["bpe", "spm"], default="bpe",
+    ap.add_argument("--cases", choices=sorted(UPSTREAM_CASES), default="bpe",
                     help="tokenizer family whose test vectors to use (default: bpe)")
+    ap.add_argument("--pre", choices=["llama-bpe", "qwen2"], default="llama-bpe",
+                    help="pre-tokenizer of the synthetic vocabulary (default: llama-bpe)")
     ap.add_argument("mode", choices=["synthetic", "golden"])
     ap.add_argument("vocab", type=Path, help="vocabulary to write (synthetic) or read (golden)")
     ap.add_argument("golden", type=Path, help="golden tokenizations to write")
@@ -204,7 +215,7 @@ def main() -> None:
     oracle = build_oracle(llama, args.build_dir)
     if args.mode == "synthetic":
         args.vocab.parent.mkdir(parents=True, exist_ok=True)
-        write_vocab(llama, args.vocab)
+        write_vocab(llama, args.vocab, args.pre)
     with tempfile.TemporaryDirectory() as tmp:
         cases = cases_file(llama, Path(tmp), args.cases)
         args.golden.parent.mkdir(parents=True, exist_ok=True)
