@@ -1,4 +1,5 @@
 #pragma once
+// Ported from ggml (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file dot.hpp
 /// @brief Fused dot products of one encoded weight row with quantized activations.
 ///

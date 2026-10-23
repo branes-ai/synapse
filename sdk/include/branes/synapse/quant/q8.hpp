@@ -1,4 +1,5 @@
 #pragma once
+// Ported from ggml (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file q8.hpp
 /// @brief 8-bit activation formats and the quantizers that produce them.
 ///

@@ -315,3 +315,5 @@ The tokenizer (`tokenizer/any_tokenizer`, chosen by the vocabulary's `tokenizer.
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Parts of synapse are ported from [llama.cpp and ggml](https://github.com/ggml-org/llama.cpp) (MIT), its YaRN RoPE scaling follows [YaRN](https://github.com/jquesnelle/yarn) (MIT), and its Unicode tables are generated from the Unicode Character Database (Unicode License v3). Their notices, and which files derive from each, are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

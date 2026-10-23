@@ -1,4 +1,5 @@
 #pragma once
+// Ported from llama.cpp (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file spm.hpp
 /// @brief SentencePiece (Llama 2 family) tokenization, as llama.cpp does it.
 ///

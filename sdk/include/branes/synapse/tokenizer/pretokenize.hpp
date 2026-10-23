@@ -1,4 +1,5 @@
 #pragma once
+// Ported from llama.cpp (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file pretokenize.hpp
 /// @brief The Llama-3, Qwen2 and Tekken pre-tokenizers: split text into the words BPE merges within.
 ///

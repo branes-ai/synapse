@@ -1,4 +1,5 @@
 #pragma once
+// Ported from llama.cpp (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file vocab.hpp
 /// @brief What the tokenizers share: token types, errors, options, and
 /// special-token splitting, as llama.cpp's llama-vocab.cpp does them.

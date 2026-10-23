@@ -1,4 +1,6 @@
 #pragma once
+// Generated from the Unicode Character Database (Unicode License v3);
+// see THIRD_PARTY_NOTICES.md.
 /// @file unicode_tables.hpp
 /// @brief Unicode 15.1.0 letter (\p{L}) and number (\p{N}) code point ranges.
 ///

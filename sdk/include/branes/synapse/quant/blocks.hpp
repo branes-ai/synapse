@@ -1,4 +1,5 @@
 #pragma once
+// Ported from ggml (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file blocks.hpp
 /// @brief GGML block-quantization layouts and their reference dequantizers.
 ///

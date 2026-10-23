@@ -1,4 +1,5 @@
 #pragma once
+// Ported from llama.cpp (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file unicode.hpp
 /// @brief The Unicode pieces of byte-level BPE: UTF-8, code point classes, GPT-2's byte map.
 ///
