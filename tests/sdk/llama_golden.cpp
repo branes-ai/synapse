@@ -20,9 +20,10 @@
 //     it also agrees to ~1e-7, but a transformer amplifies any one flipped
 //     8-bit activation rounding (an ulp of exp or cos differs between C
 //     runtimes) to ~1e-2 in the logits; an error in a quantized format would
-//     be O(1). The bound is 5e-2 RMS: mistral3_tiny shows two such flips,
-//     2e-2 at position 15 and 7e-3 at position 7 (every other position
-//     ~1e-7), in both the scalar and the Highway build. They trace to RoPE:
+//     be O(1). The bound is 1e-2 RMS, and 5e-2 for mistral3_tiny, which
+//     shows two such flips, 2e-2 at position 15 and 7e-3 at position 7
+//     (every other position ~1e-7), in both the scalar and the Highway
+//     build. They trace to RoPE:
 //     ggml's CPU build (GCC, -march=native, which contracts by default) fuses
 //     the rotation x0*cos - x1*sin into FMAs, so its rotated Q and K differ
 //     from synapse's (contraction off) by an ulp in about a fifth of the
@@ -57,7 +58,7 @@ TEST_CASE("llama_golden: decode logits match llama.cpp on the tiny model", "[lla
     for (std::size_t i = 0; i < run.positions.size(); ++i) {
         const auto& m = run.positions[i];
         INFO("position " << i << ": rel max err " << m.rel_max_err << ", rel rms err " << m.rel_rms_err);
-        CHECK(m.rel_rms_err < 5e-2);
+        CHECK(m.rel_rms_err < (name == "mistral3_tiny" ? 5e-2 : 1e-2));
         CHECK(m.same_argmax);
     }
 }
