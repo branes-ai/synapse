@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/branes-ai/synapse/compare/v0.10.0...v0.10.1) (2026-10-23)
+
+
+### Documentation
+
+* explain the GGML ecosystem and what a Llama model computes ([#37](https://github.com/branes-ai/synapse/issues/37)) ([1f9cc9f](https://github.com/branes-ai/synapse/commit/1f9cc9f8ac129abfccc19cc2911357eb46b6c26a))
+
 ## [0.10.0](https://github.com/branes-ai/synapse/compare/v0.9.1...v0.10.0) (2026-10-23)
 
 
