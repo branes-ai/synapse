@@ -264,6 +264,8 @@ TEST_CASE("gguf_reader: rejects invalid tensor records", "[gguf]") {
     CHECK(parse_error(one_tensor({"t", {4, 0}, f32_tag, 0})) == errc::bad_dims);
     CHECK(parse_error(one_tensor({"t", {std::uint64_t{1} << 32, std::uint64_t{1} << 32}, f32_tag, 0})) ==
           errc::bad_dims);
+    // A single row whose byte count wraps: 2^62 F32 elements are 2^64 bytes.
+    CHECK(parse_error(one_tensor({"t", {std::uint64_t{1} << 62}, f32_tag, 0})) == errc::bad_dims);
     CHECK(parse_error(one_tensor({"t", {256}, 16, 0})) == errc::unsupported_tensor_type);  // IQ2_XXS
     CHECK(parse_error(one_tensor({"t", {33}, q4_0_tag, 0})) == errc::partial_block);
     CHECK(parse_error(one_tensor({"t", {4}, f32_tag, 8})) == errc::misaligned_tensor);
