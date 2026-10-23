@@ -194,7 +194,7 @@ Per decode token, from [assessments/block-scaled-dot-performance.md §2.2](asses
 - **On the test machine:** 20 threads decode only about 8× faster than one, consistent with the cores saturating memory bandwidth. Peak DRAM bandwidth was not measured.
 
 **Prefill is compute-bound.**
-- **Why:** a batch of 64 reads each weight once for 64 tokens, about 57 multiply-accumulates per weight byte (§2.3 of the assessment).
+- **Why:** a batch of 64 reads each weight once for 64 tokens, about 78 multiply-accumulates per weight byte. The assessment's figure of about 57 (its §2.3) is for its 93-token prompt, which runs as two batches, 64 + 29, and so reads the weights twice.
 - **Where the time goes:** unpacking 4- and 6-bit weights and doing integer multiply-adds.
 
 ## 6. The family: Llama, Qwen2, Mistral
@@ -231,7 +231,7 @@ It sharpens attention at positions beyond the original context. Below 16,384 pos
 The model sees token ids, not text. The vocabulary in the GGUF file defines the mapping, and synapse reproduces llama.cpp's tokenizers exactly (`tokenizer/`).
 
 **Byte-level BPE** (Llama 3, Qwen2, Tekken; `tokenizer/bpe.hpp`) works in four steps:
-1. Split out special tokens such as `<|eot_id|>`.
+1. Split out special tokens. User-defined tokens are always split out; control and unknown tokens such as `<|eot_id|>` only when `parse_special` is set.
 2. Split the remaining text into words with the pre-tokenizer's regex (`tokenizer/pretokenize.hpp`). The regexes differ:
    - Llama 3 groups digits in threes;
    - Qwen2 splits every digit;
@@ -251,7 +251,7 @@ Detokenization concatenates each token's text, with the byte map or the `▁` es
 ### Where llama.cpp rounds
 
 On the path synapse implements (CPU, flash attention off, F16 KV cache), llama.cpp rounds at fixed points. synapse rounds at the same ones:
-- **Activations of a quantized matrix product** are rounded to 8 bits (Q8_0 or Q8_K) before the integer dot. Activations of an F16 matrix are rounded to F16.
+- **Activations of a quantized matrix product** are rounded to 8 bits (Q8_0 or Q8_K) before the integer dot. Plain float weight formats keep float activations: ggml converts them to the weight's format, so they are rounded to F16 for F16 weights and to BF16 for BF16 weights, and stay exact for F32 weights.
 - **K and V** are stored in the cache as F16.
 - **q** is rounded to F16 before the q·k dot, because ggml's F16 matrix product converts its F32 operand.
 - **The softmax probabilities** are rounded to F16 before they weight V.
