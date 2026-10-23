@@ -9,9 +9,9 @@
 /// weights is shared by the batch.
 ///
 /// Contract G1: row t of Y equals gemv(w, row t of X) bit for bit. Both
-/// accumulate block_kernel<S>::dot(unpack(row, i), a_t, i) over the blocks i
-/// in order, starting from 0.0f (see dot.hpp), and quantize the activations
-/// with the same function. So a prompt prefilled in batches leaves the same
+/// accumulate weight_chunk<S>::dot(a_t) over the row's chunks in order,
+/// starting from 0.0f (see dot.hpp), and quantize the activations with the
+/// same function. So a prompt prefilled in batches leaves the same
 /// results as decoding it one token at a time.
 ///
 /// G1 holds when the compiler does not fuse multiply-adds (FMA contraction),
@@ -22,7 +22,7 @@
 /// target with GCC or Clang compiles with -ffp-contract=off as well.
 ///
 /// gemm never allocates and never throws: the activations and their
-/// descriptors live in caller-provided scratch, the accumulators on the stack.
+/// descriptors live in caller-provided scratch, the sums in y itself.
 /// gemm_prepare + gemm_rows split it so the rows can be spread over threads.
 
 #include <branes/synapse/kernels/dot.hpp>
@@ -36,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 namespace branes::synapse::kernels {
 
@@ -58,10 +59,15 @@ constexpr std::size_t gemm_row_stride(std::size_t cols) noexcept {
 
 }  // namespace detail
 
-/// Tokens gemm_rows accumulates at once, in a stack array. A batch larger
-/// than this is processed in tiles (each weight block is unpacked once per
-/// tile); the order of every (row, token) accumulation is unchanged.
-inline constexpr std::size_t gemm_token_tile = 64;
+/// Weight rows gemm_rows unpacks together (one chunk each, on the stack), so
+/// a token's chunk of activations is reused across the tile while it is in
+/// L1. The tiling only reorders independent (row, token) sums, never the
+/// order within one, so it does not affect results (G1, D1). Measured on
+/// AVX2 with Llama-3.2-1B Q4_K_M prefill: 4 beats 1 by ~10% and 8 by ~5%.
+inline constexpr std::size_t gemm_row_tile = 4;
+/// Batches smaller than this skip the row tile: a single token (decode) has
+/// no activations to reuse, and one row at a time keeps its chunk hotter.
+inline constexpr std::size_t gemm_tile_min_tokens = 2;
 
 /// Scratch bytes gemm needs for n activation rows of `cols` columns: per row,
 /// the quantized activations (as gemv) and their descriptor.
@@ -105,33 +111,54 @@ void gemm_rows(const quantized_matrix_view<S>& w,
     const std::size_t cols = w.cols();
     const std::size_t rows = w.rows();
     assert(r0 <= r1 && r1 <= rows && y.size() == n * rows);  // Pre
-    std::array<float, gemm_token_tile> acc{};
-    for (std::size_t r = r0; r < r1; ++r) {
-        const std::byte* row = w.row_bytes(r).data();
-        for (std::size_t t0 = 0; t0 < n; t0 += gemm_token_tile) {
-            const std::size_t nt = std::min(gemm_token_tile, n - t0);
-            for (std::size_t t = 0; t < nt; ++t) {
-                acc[t] = 0.0f;
+    if constexpr (S::block_size == 1) {
+        // Plain formats: each chunk of a row decoded to float once, dotted
+        // with every token; the sums accumulate in y (a float store and
+        // reload is exact), starting at 0, in chunk order, as gemv (G1).
+        std::array<float, plain_chunk> buf{};
+        for (std::size_t r = r0; r < r1; ++r) {
+            const std::byte* row = w.row_bytes(r).data();
+            for (std::size_t t = 0; t < n; ++t) {
+                y[t * rows + r] = 0.0f;
             }
-            if constexpr (S::block_size == 1) {
-                std::array<float, plain_chunk> buf{};
-                for (std::size_t i = 0; i * plain_chunk < cols; ++i) {
-                    const std::size_t len = std::min(plain_chunk, cols - i * plain_chunk);
-                    plain_kernel<S>::unpack(row, i, len, buf.data());
-                    for (std::size_t t = 0; t < nt; ++t) {
-                        acc[t] += plain_kernel<S>::dot(buf.data(), acts[t0 + t].x, i, len);
-                    }
-                }
-            } else {
-                for (std::size_t i = 0; i < w.blocks_per_row(); ++i) {
-                    const auto u = block_kernel<S>::unpack(row, i);
-                    for (std::size_t t = 0; t < nt; ++t) {
-                        acc[t] += block_kernel<S>::dot(u, acts[t0 + t], i);
-                    }
+            for (std::size_t i = 0; i * plain_chunk < cols; ++i) {
+                const std::size_t len = std::min(plain_chunk, cols - i * plain_chunk);
+                plain_kernel<S>::unpack(row, i, len, buf.data());
+                for (std::size_t t = 0; t < n; ++t) {
+                    y[t * rows + r] += plain_kernel<S>::dot(buf.data(), acts[t].x, i, len);
                 }
             }
-            for (std::size_t t = 0; t < nt; ++t) {
-                y[(t0 + t) * rows + r] = acc[t];
+        }
+    } else {
+        // Quantized formats: a tile of gemm_row_tile weight rows x all tokens.
+        // Chunk c of every row in the tile is unpacked once (in L1), then each
+        // token's chunk of activations is dotted with all of them while it is
+        // hot. Every (row, token) sum still starts at 0 and adds its chunk
+        // dots in chunk order, as gemv does (G1), whatever the tiling.
+        using C = weight_chunk<S>;
+        std::array<C, gemm_row_tile> chunks;
+        const std::size_t blocks = w.blocks_per_row();
+        // A single token has nothing to reuse across rows; one row at a time
+        // keeps its chunk hot instead.
+        const std::size_t tile = n >= gemm_tile_min_tokens ? gemm_row_tile : 1;
+        for (std::size_t g = r0; g < r1; g += tile) {
+            const std::size_t nr = std::min(tile, r1 - g);
+            for (std::size_t t = 0; t < n; ++t) {
+                for (std::size_t j = 0; j < nr; ++j) {
+                    y[t * rows + g + j] = 0.0f;
+                }
+            }
+            for (std::size_t b0 = 0; b0 < blocks; b0 += C::max_blocks) {
+                const std::size_t nb = std::min(C::max_blocks, blocks - b0);
+                for (std::size_t j = 0; j < nr; ++j) {
+                    chunks[j].load(w.row_bytes(g + j).data(), b0, nb);
+                }
+                for (std::size_t t = 0; t < n; ++t) {
+                    float* yt = y.data() + t * rows + g;
+                    for (std::size_t j = 0; j < nr; ++j) {
+                        yt[j] += chunks[j].dot(acts[t]);
+                    }
+                }
             }
         }
     }

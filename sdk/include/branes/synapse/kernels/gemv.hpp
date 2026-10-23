@@ -82,7 +82,21 @@ activations<A> prepare_activations(std::span<const float> x, std::span<std::byte
                 wide[i * qk + j] = blocks[i].qs[j];
             }
         }
-        return {blocks, wide};
+        if constexpr (std::is_same_v<A, quant::block_q8_k>) {
+            // The sub-block sums, contiguous: the operand of Q4_K's min terms.
+            constexpr std::size_t subs = sizeof(quant::block_q8_k::bsums) / sizeof(std::int16_t);
+            std::int16_t* bsums =
+                ::new (static_cast<void*>(scratch.data() + wide_offset<A>(x.size()) + x.size() * sizeof(std::int16_t)))
+                    std::int16_t[nb * subs];
+            for (std::size_t i = 0; i < nb; ++i) {
+                for (std::size_t j = 0; j < subs; ++j) {
+                    bsums[i * subs + j] = blocks[i].bsums[j];
+                }
+            }
+            return {blocks, wide, bsums};
+        } else {
+            return {blocks, wide};
+        }
     }
 }
 
@@ -98,7 +112,12 @@ constexpr std::size_t gemv_scratch_bytes(std::size_t cols) noexcept {
     if constexpr (std::is_same_v<A, float>) {
         return 0;
     } else {
-        return detail::wide_offset<A>(cols) + cols * sizeof(std::int16_t);
+        const std::size_t bytes = detail::wide_offset<A>(cols) + cols * sizeof(std::int16_t);
+        if constexpr (std::is_same_v<A, quant::block_q8_k>) {
+            return bytes + cols / quant::qk_k * sizeof(quant::block_q8_k::bsums);  // contiguous bsums
+        } else {
+            return bytes;
+        }
     }
 }
 
