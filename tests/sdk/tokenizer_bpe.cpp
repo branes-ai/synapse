@@ -124,8 +124,8 @@ TEST_CASE("tokenizer_bpe: a minimal vocabulary loads and merges", "[tokenizer][b
     CHECK(t->adds_bos());  // llama.cpp's default for llama-bpe
     // Byte tokens are listed in byte order, so "c" is token 99.
     CHECK(t->encode("abc") == std::vector<std::uint32_t>{257, 256, 'c'});
-    CHECK(t->encode("abc", {.add_bos = false}) == std::vector<std::uint32_t>{256, 'c'});
-    CHECK(t->encode("<s>", {.add_bos = false, .parse_special = true}) == std::vector<std::uint32_t>{257});
+    CHECK(t->encode("abc", {.add_special = false}) == std::vector<std::uint32_t>{256, 'c'});
+    CHECK(t->encode("<s>", {.add_special = false, .parse_special = true}) == std::vector<std::uint32_t>{257});
     CHECK(t->decode(257) == "");
     CHECK(t->decode(257, true) == "<s>");
 }
@@ -197,6 +197,6 @@ TEST_CASE("tokenizer_bpe: decode(encode(s)) == s for random valid UTF-8 (T2)", "
             tokenizer::append_utf8(std::uniform_int_distribution<std::uint32_t>(lo, hi)(rng), s);
         }
         INFO("text: \"" << s << "\"");
-        CHECK(tok().decode(tok().encode(s, {.add_bos = false})) == s);
+        CHECK(tok().decode(tok().encode(s, {.add_special = false})) == s);
     }
 }

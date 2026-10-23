@@ -14,9 +14,14 @@ Two modes:
   python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
       [--build-dir DIR] golden vocab.gguf golden.gguf
 
+  # the SentencePiece CI fixture: llama.cpp's Llama-2 vocabulary
+  # (models/ggml-vocab-llama-spm.gguf, copied to tests/data/spm_vocab.gguf)
+  python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
+      [--build-dir DIR] --cases spm golden tests/data/spm_vocab.gguf tests/data/spm_golden.gguf
+
 The test cases are llama.cpp's own tokenizer test vectors
-(models/ggml-vocab-llama-bpe.gguf.inp) followed by synapse's additional edge
-cases. The pre-tokenizer's behaviour does not depend on the vocabulary, so
+(models/ggml-vocab-llama-{bpe,spm}.gguf.inp, per --cases) followed by
+synapse's additional edge cases for that tokenizer family. The pre-tokenizer's behaviour does not depend on the vocabulary, so
 the small vocabulary exercises it fully; the merges exercise BPE.
 """
 
@@ -71,6 +76,23 @@ EXTRA_CASES = [
     "<|end_of_text|>",
     " non-breaking em space　ideographic",
     "invalid utf-8: \udcff\udcfe and a lone continuation \udc80 here",
+    "",
+]
+
+
+# SentencePiece-specific cases: the space prefix around special tokens, the
+# U+2581 escape, byte fallback for characters outside the vocabulary, and
+# raw invalid UTF-8 (kept byte for byte by SPM's byte fallback).
+SPM_EXTRA_CASES = [
+    "<s>Hello</s>",
+    "<s> Hello <s>world</s>",
+    "text<unk>more <unk> text",
+    "already\u2581escaped\u2581text",
+    "rare characters: 𝔘𝔫𝔦𝔠𝔬𝔡𝔢 ꙮ 🫠 ᚠᚢᚦ",
+    "  two leading spaces and trailing  ",
+    "tabs\tand\nnewlines\r\n",
+    "invalid utf-8: \udcff\udcfe and a lone continuation \udc80 here",
+    "\udce2AB truncated lead",
     "",
 ]
 
@@ -157,10 +179,11 @@ def write_vocab(llama: Path, path: Path) -> None:
     print(f"wrote {path}: {len(tokens)} tokens, {len(merges)} merges")
 
 
-def cases_file(llama: Path, directory: Path) -> Path:
-    upstream = (llama / "models" / "ggml-vocab-llama-bpe.gguf.inp").read_bytes()
+def cases_file(llama: Path, directory: Path, family: str) -> Path:
+    upstream = (llama / "models" / f"ggml-vocab-llama-{family}.gguf.inp").read_bytes()
     # Lone surrogates above stand for raw invalid bytes.
-    extra = b"".join(c.encode("utf-8", "surrogateescape") + SEPARATOR.encode() for c in EXTRA_CASES)
+    cases = EXTRA_CASES if family == "bpe" else SPM_EXTRA_CASES
+    extra = b"".join(c.encode("utf-8", "surrogateescape") + SEPARATOR.encode() for c in cases)
     path = directory / "cases.txt"
     path.write_bytes(upstream + extra)
     return path
@@ -170,6 +193,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--llama-cpp", required=True, type=Path, help="path to a llama.cpp checkout")
     ap.add_argument("--build-dir", type=Path, help="llama.cpp build directory (default: a temp dir)")
+    ap.add_argument("--cases", choices=["bpe", "spm"], default="bpe",
+                    help="tokenizer family whose test vectors to use (default: bpe)")
     ap.add_argument("mode", choices=["synthetic", "golden"])
     ap.add_argument("vocab", type=Path, help="vocabulary to write (synthetic) or read (golden)")
     ap.add_argument("golden", type=Path, help="golden tokenizations to write")
@@ -181,7 +206,7 @@ def main() -> None:
         args.vocab.parent.mkdir(parents=True, exist_ok=True)
         write_vocab(llama, args.vocab)
     with tempfile.TemporaryDirectory() as tmp:
-        cases = cases_file(llama, Path(tmp))
+        cases = cases_file(llama, Path(tmp), args.cases)
         args.golden.parent.mkdir(parents=True, exist_ok=True)
         run([str(oracle), "tokenize", str(args.vocab), str(cases), str(args.golden)])
     print(f"wrote {args.golden} ({args.golden.stat().st_size} bytes)")

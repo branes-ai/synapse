@@ -36,5 +36,16 @@ TEST_CASE("tokenizer_golden: encode and decode match llama.cpp on a real vocabul
     if (!vocab || !golden) {
         SKIP("set SYNAPSE_BPE_VOCAB and SYNAPSE_BPE_GOLDEN to run");
     }
-    CHECK(synapse_test::check_tokenizer_golden(*vocab, *golden) >= 60);
+    CHECK(synapse_test::check_tokenizer_golden(*vocab, *golden) >= 50);  // BPE or SPM case set
+}
+
+// tests/data/spm_vocab.gguf is llama.cpp's own Llama-2 SentencePiece
+// vocabulary (models/ggml-vocab-llama-spm.gguf: 32,000 tokens with scores,
+// 256 byte tokens), and spm_golden.gguf holds llama.cpp's tokenizations of
+// its SPM test vectors plus synapse's SPM edge cases (space prefix around
+// special tokens, byte fallback, invalid UTF-8).
+TEST_CASE("tokenizer_golden: SentencePiece encode and decode match llama.cpp on the Llama-2 vocabulary",
+          "[tokenizer][golden][spm]") {
+    const std::string dir = SYNAPSE_TEST_DATA_DIR;
+    CHECK(synapse_test::check_tokenizer_golden(dir + "/spm_vocab.gguf", dir + "/spm_golden.gguf") >= 50);
 }
