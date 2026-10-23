@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/branes-ai/synapse/compare/v0.9.0...v0.9.1) (2026-10-23)
+
+
+### Documentation
+
+* **readme:** qualify hardware targets and explain the stack diagram arrows ([#27](https://github.com/branes-ai/synapse/issues/27)) ([639ec4b](https://github.com/branes-ai/synapse/commit/639ec4b5a13cb31fb5e538c9741dc466b16a9d67))
+
 ## [0.9.0](https://github.com/branes-ai/synapse/compare/v0.8.1...v0.9.0) (2026-10-23)
 
 
