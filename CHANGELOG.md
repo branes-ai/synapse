@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/branes-ai/synapse/compare/v0.8.1...v0.9.0) (2026-10-23)
+
+
+### Features
+
+* **tokenizer:** sentencepiece tokenizer for llama-2-family vocabularies ([#26](https://github.com/branes-ai/synapse/issues/26)) ([5f432d8](https://github.com/branes-ai/synapse/commit/5f432d8d2d74a2954af14c220016dec79cddebaf))
+
 ## [0.8.1](https://github.com/branes-ai/synapse/compare/v0.8.0...v0.8.1) (2026-10-23)
 
 
