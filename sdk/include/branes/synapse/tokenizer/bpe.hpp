@@ -14,7 +14,8 @@
 ///      merges, lowest rank first (ties: leftmost), until none applies, and
 ///      look each resulting piece up (a piece with no token falls back to its
 ///      single-character tokens).
-///   4. Prepend BOS when add_bos.
+///   4. Prepend BOS (and append EOS) when the vocabulary asks for them and
+///      add_special is set.
 ///
 /// Model
 /// -----
@@ -42,6 +43,7 @@
 #include <branes/synapse/result.hpp>
 #include <branes/synapse/tokenizer/pretokenize.hpp>
 #include <branes/synapse/tokenizer/unicode.hpp>
+#include <branes/synapse/tokenizer/vocab.hpp>
 
 #include <algorithm>
 #include <cstddef>
@@ -57,50 +59,6 @@
 #include <vector>
 
 namespace branes::synapse::tokenizer {
-
-/// GGUF token types (tokenizer.ggml.token_type).
-enum class token_type : std::int32_t {
-    undefined = 0,
-    normal = 1,
-    unknown = 2,
-    control = 3,
-    user_defined = 4,
-    unused = 5,
-    byte = 6,
-};
-
-inline constexpr std::uint32_t no_token = std::numeric_limits<std::uint32_t>::max();
-
-enum class tokenizer_errc : std::uint32_t {
-    unsupported_model = 1,  ///< tokenizer.ggml.model is not "gpt2"
-    unsupported_pre,        ///< the pre-tokenizer is not Llama 3's
-    missing_key,            ///< a required tokenizer key is absent
-    bad_value,              ///< a key has the wrong type or an invalid value
-};
-
-constexpr std::string_view to_string(tokenizer_errc code) noexcept {
-    switch (code) {
-    case tokenizer_errc::unsupported_model:
-        return "unsupported tokenizer model";
-    case tokenizer_errc::unsupported_pre:
-        return "unsupported pre-tokenizer";
-    case tokenizer_errc::missing_key:
-        return "missing tokenizer key";
-    case tokenizer_errc::bad_value:
-        return "invalid tokenizer value";
-    }
-    return "unknown error";
-}
-
-struct tokenizer_error {
-    tokenizer_errc code;
-    std::string name;  ///< the key concerned, if any
-};
-
-struct encode_options {
-    bool add_bos = true;         ///< prepend BOS if the vocabulary asks for it
-    bool parse_special = false;  ///< recognize control tokens' text (e.g. "<|eot_id|>")
-};
 
 class bpe_tokenizer {
 public:
@@ -180,15 +138,17 @@ public:
             }
             *out = *id;
         }
-        if (f.find("tokenizer.ggml.add_bos_token") != nullptr) {
-            const auto add = f.get<bool>("tokenizer.ggml.add_bos_token");
-            if (!add) {
-                return fail(tokenizer_errc::bad_value, "tokenizer.ggml.add_bos_token");
+        for (auto [key, out] : {std::pair{"tokenizer.ggml.add_bos_token", &t.add_bos_},
+                                std::pair{"tokenizer.ggml.add_eos_token", &t.add_eos_}}) {
+            if (!read_flag(f, key, *out)) {
+                return fail(tokenizer_errc::bad_value, key);
             }
-            t.add_bos_ = *add;
         }
         if (t.add_bos_ && t.bos_ == no_token) {
             return fail(tokenizer_errc::missing_key, "tokenizer.ggml.bos_token_id");
+        }
+        if (t.add_eos_ && t.eos_ == no_token) {
+            return fail(tokenizer_errc::missing_key, "tokenizer.ggml.eos_token_id");
         }
 
         // T2: every byte must be spellable, or some input cannot be encoded.
@@ -200,16 +160,7 @@ public:
             }
         }
 
-        for (std::size_t i = 0; i < t.tokens_.size(); ++i) {
-            const token_type ty = t.types_[i];
-            if ((ty == token_type::control || ty == token_type::unknown || ty == token_type::user_defined) &&
-                !t.tokens_[i].empty()) {
-                t.specials_.push_back(static_cast<std::uint32_t>(i));
-            }
-        }
-        std::stable_sort(t.specials_.begin(), t.specials_.end(), [&](std::uint32_t a, std::uint32_t b) {
-            return t.tokens_[a].size() > t.tokens_[b].size();
-        });
+        t.specials_ = special_tokens(t.tokens_, t.types_);
         return t;
     }
 
@@ -232,51 +183,18 @@ public:
     /// The token ids of `text`.
     std::vector<std::uint32_t> encode(std::string_view text, encode_options opt = {}) const {
         std::vector<std::uint32_t> out;
-        if (opt.add_bos && add_bos_) {
+        if (opt.add_special && add_bos_) {
             out.push_back(bos_);
         }
-        // Fragments: raw text (offset, length) or a special token.
-        struct fragment {
-            std::size_t offset, length;
-            std::uint32_t token;  // no_token for raw text
-        };
-        std::vector<fragment> frags{{0, text.size(), no_token}};
-        for (std::uint32_t id : specials_) {
-            if (!opt.parse_special && types_[id] != token_type::user_defined) {
-                continue;
-            }
-            const std::string_view s = tokens_[id];
-            std::vector<fragment> next;
-            for (const fragment& fr : frags) {
-                if (fr.token != no_token) {
-                    next.push_back(fr);
-                    continue;
-                }
-                std::size_t at = fr.offset;
-                const std::size_t stop = fr.offset + fr.length;
-                while (true) {
-                    const std::size_t m = text.substr(0, stop).find(s, at);
-                    if (m == std::string_view::npos) {
-                        break;
-                    }
-                    if (m > at) {
-                        next.push_back({at, m - at, no_token});
-                    }
-                    next.push_back({m, s.size(), id});
-                    at = m + s.size();
-                }
-                if (at < stop) {
-                    next.push_back({at, stop - at, no_token});
-                }
-            }
-            frags = std::move(next);
-        }
-        for (const fragment& fr : frags) {
+        for (const fragment& fr : split_specials(text, tokens_, types_, specials_, opt.parse_special)) {
             if (fr.token != no_token) {
                 out.push_back(fr.token);
             } else {
                 encode_text(text.substr(fr.offset, fr.length), out);
             }
+        }
+        if (opt.add_special && add_eos_) {
+            out.push_back(eos_);
         }
         return out;
     }
@@ -459,6 +377,7 @@ private:
     std::uint32_t bos_ = no_token;
     std::uint32_t eos_ = no_token;
     bool add_bos_ = true;  ///< llama.cpp's default for the llama3 pre-tokenizer
+    bool add_eos_ = false;
 };
 
 }  // namespace branes::synapse::tokenizer

@@ -1,10 +1,11 @@
-// Checks synapse's BPE tokenizer against llama.cpp's tokenizations of the
+// Checks synapse's tokenizer (BPE or SentencePiece, as the vocabulary asks)
+// against llama.cpp's tokenizations of the
 // cases in a golden file (written by scripts/gen_tokenizer_fixture.py).
 #pragma once
 
 #include <branes/synapse/gguf/mapped_file.hpp>
 #include <branes/synapse/gguf/reader.hpp>
-#include <branes/synapse/tokenizer/bpe.hpp>
+#include <branes/synapse/tokenizer/tokenizer.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -37,7 +38,7 @@ inline std::size_t check_tokenizer_golden(const std::filesystem::path& vocab_pat
     REQUIRE(vocab);
     auto golden = gguf::parse(gf->bytes());
     REQUIRE(golden);
-    auto tok = tokenizer::bpe_tokenizer::from_gguf(*vocab);
+    auto tok = tokenizer::any_tokenizer::from_gguf(*vocab);
     if (!tok) {
         FAIL(to_string(tok.error().code) << ": " << tok.error().name);
     }
@@ -48,9 +49,9 @@ inline std::size_t check_tokenizer_golden(const std::filesystem::path& vocab_pat
         const auto text = golden->get<std::string_view>(key + "text");
         REQUIRE(text);
         INFO("case " << i << ": \"" << *text << "\"");
-        CHECK(tok->encode(*text, {.add_bos = true, .parse_special = false}) == u32_array(*golden, key + "plain"));
+        CHECK(tok->encode(*text, {.add_special = true, .parse_special = false}) == u32_array(*golden, key + "plain"));
         const auto special = u32_array(*golden, key + "special");
-        CHECK(tok->encode(*text, {.add_bos = true, .parse_special = true}) == special);
+        CHECK(tok->encode(*text, {.add_special = true, .parse_special = true}) == special);
         CHECK(tok->decode(special, true) == *golden->get<std::string_view>(key + "detok"));
     }
     return *count;

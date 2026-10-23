@@ -3,8 +3,9 @@
 //   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [-t <threads>]
 //                (-p <prompt text> | <token id>...)
 //
-// Tokenizes the prompt (-p, for Llama-3-style BPE vocabularies; special
-// tokens such as <|eot_id|> in the text are recognized) or takes its token
+// Tokenizes the prompt (-p; byte-level BPE for Llama 3 vocabularies,
+// SentencePiece for Llama 2 / TinyLlama ones; special tokens such as
+// <|eot_id|> or </s> in the text are recognized) or takes its token
 // ids, prefills it in runs of up to -b tokens (default 64; -b 1 decodes the
 // prompt one token at a time, with the same result), then generates up to
 // -n more by taking the most likely next token each step, stopping at the
@@ -19,7 +20,7 @@
 #include <branes/synapse/gguf/reader.hpp>
 #include <branes/synapse/graph/session.hpp>
 #include <branes/synapse/models/llama.hpp>
-#include <branes/synapse/tokenizer/bpe.hpp>
+#include <branes/synapse/tokenizer/tokenizer.hpp>
 
 #include <algorithm>
 #include <cerrno>
@@ -197,16 +198,16 @@ int main(int argc, char** argv) {
     if (text && !prompt.empty()) {
         return usage(argv[0]);  // a prompt is text or ids, not both
     }
-    auto bpe = tokenizer::bpe_tokenizer::from_gguf(*parsed);
+    auto vocab = tokenizer::any_tokenizer::from_gguf(*parsed);
     if (text) {
-        if (!bpe) {
+        if (!vocab) {
             std::fprintf(stderr,
                          "cannot tokenize -p for this model: %s %s\n",
-                         std::string(to_string(bpe.error().code)).c_str(),
-                         bpe.error().name.c_str());
+                         std::string(to_string(vocab.error().code)).c_str(),
+                         vocab.error().name.c_str());
             return 1;
         }
-        prompt = bpe->encode(*text, {.add_bos = true, .parse_special = true});
+        prompt = vocab->encode(*text, {.add_special = true, .parse_special = true});
     }
     if (prompt.empty()) {
         if (const auto bos = parsed->get<std::uint32_t>("tokenizer.ggml.bos_token_id")) {
@@ -256,8 +257,8 @@ int main(int argc, char** argv) {
                  s.threads());
 
     const detokenizer fallback(*parsed);
-    const auto show = [&](std::uint32_t t) { return bpe ? bpe->decode(t, true) : fallback.text(t); };
-    const std::uint32_t eos = bpe ? bpe->eos() : tokenizer::no_token;
+    const auto show = [&](std::uint32_t t) { return vocab ? vocab->decode(t, true) : fallback.text(t); };
+    const std::uint32_t eos = vocab ? vocab->eos() : tokenizer::no_token;
     using clock = std::chrono::steady_clock;
     std::uint32_t pos = 0;
     std::uint32_t next = 0;
