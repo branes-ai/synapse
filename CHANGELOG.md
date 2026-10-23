@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/branes-ai/synapse/compare/v0.8.0...v0.8.1) (2026-10-23)
+
+
+### Performance
+
+* **kernels:** use mtl5 5.20's block-scaled integer dot for quantized products ([#24](https://github.com/branes-ai/synapse/issues/24)) ([743ad8e](https://github.com/branes-ai/synapse/commit/743ad8ed296f1b67033f13486748c3ff7336edc8))
+
 ## [0.8.0](https://github.com/branes-ai/synapse/compare/v0.7.0...v0.8.0) (2026-10-22)
 
 
