@@ -1,6 +1,6 @@
 #pragma once
 /// @file bpe.hpp
-/// @brief Byte-level BPE tokenization of Llama-3 and Qwen2 vocabularies, as llama.cpp does it.
+/// @brief Byte-level BPE tokenization of Llama-3, Qwen2 and Tekken vocabularies, as llama.cpp does it.
 ///
 /// encode(text):
 ///   1. Split out special tokens: every control, unknown or user-defined
@@ -9,10 +9,10 @@
 ///      parse_special; user-defined ones always are, as in Hugging Face's
 ///      tokenizers and llama.cpp.
 ///   2. Pre-tokenize each remaining fragment into words (split_words, with
-///      the regex tokenizer.ggml.pre names: "llama-bpe" or "qwen2").
-///   3. Spell each word's UTF-8 bytes with GPT-2's byte map. For Llama 3, a
-///      word that is a token as a whole is that token (llama.cpp's
-///      ignore_merges, which it sets for Llama 3 only); otherwise apply the
+///      the regex tokenizer.ggml.pre names: "llama-bpe", "qwen2" or "tekken").
+///   3. Spell each word's UTF-8 bytes with GPT-2's byte map. For Llama 3 and
+///      Tekken, a word that is a token as a whole is that token (llama.cpp's
+///      ignore_merges, which Qwen2 does not set); otherwise apply the
 ///      merges, lowest rank first (ties: leftmost), until none applies, and
 ///      look each resulting piece up (a piece with no token falls back to its
 ///      single-character tokens).
@@ -28,7 +28,7 @@
 ///     ranks_    : map (left, right) -> merge rank
 ///     specials_ : ids of control / unknown / user-defined tokens, longest text first
 ///     bos_, eos_: ids or no_token; add_bos_, add_eos_
-///     pre_      : the pre-tokenizer (Llama 3 or Qwen2)
+///     pre_      : the pre-tokenizer (Llama 3, Qwen2 or Tekken)
 ///
 /// Invariants (established by from_gguf)
 /// ----------
@@ -86,6 +86,9 @@ public:
         } else if (pre && *pre == "qwen2") {
             t.pre_ = pre_style::qwen2;
             t.add_bos_ = false;
+        } else if (pre && *pre == "tekken") {
+            t.pre_ = pre_style::tekken;
+            t.add_bos_ = true;
         } else {
             return fail(tokenizer_errc::unsupported_pre, "tokenizer.ggml.pre");
         }
@@ -294,7 +297,7 @@ private:
 
     /// BPE within one word: repeatedly merge the adjacent pair of lowest rank.
     void merge_word(const std::string& word, std::vector<std::uint32_t>& out) const {
-        if (pre_ == pre_style::llama3) {  // ignore_merges
+        if (pre_ != pre_style::qwen2) {  // ignore_merges (Llama 3, Tekken)
             if (const auto whole = id_of(word)) {
                 out.push_back(*whole);
                 return;

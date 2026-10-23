@@ -1,10 +1,10 @@
-// llama_decode — greedy decoding of a Llama-family (Llama, Qwen2) GGUF model.
+// llama_decode — greedy decoding of a Llama-family (Llama, Qwen2, Mistral) GGUF model.
 //
 //   llama_decode <model.gguf> [-n <new tokens>] [-c <context>] [-b <batch>] [-t <threads>]
 //                (-p <prompt text> | <token id>...)
 //
-// Tokenizes the prompt (-p; byte-level BPE for Llama 3 and Qwen2
-// vocabularies, SentencePiece for Llama 2 / TinyLlama ones; special tokens
+// Tokenizes the prompt (-p; byte-level BPE for Llama 3, Qwen2 and Tekken
+// vocabularies, SentencePiece for Llama 2 / TinyLlama / Mistral 7B ones; special tokens
 // such as <|eot_id|>, <|im_end|> or </s> in the text are recognized) or takes its token
 // ids, prefills it in runs of up to -b tokens (default 64; -b 1 decodes the
 // prompt one token at a time, with the same result), then generates up to

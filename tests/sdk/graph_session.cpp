@@ -364,3 +364,28 @@ TEST_CASE("graph_session: add_bias adds the decoded bias to every row of the run
         }
     }
 }
+
+TEST_CASE("graph_session: attn_temperature scales each row by its position's temperature", "[graph][session]") {
+    graph_builder b(3);
+    const tensor_id x = b.input(8);
+    const tensor_id y = b.attn_temperature(x, 0.5f, 4);
+    b.output(y);
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+    session s{*g};
+    std::vector<float> in(24);
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        in[i] = 0.25f * static_cast<float>(i) - 2.0f;
+    }
+    std::copy(in.begin(), in.end(), s.tensor(x).begin());
+    const std::vector<std::uint32_t> tokens(3, 0);
+    REQUIRE(s.run(batch{tokens, 3}));  // positions 3, 4, 5: the floor of 4 is crossed at 4
+    const auto out = s.tensor(y);
+    for (std::size_t r = 0; r < 3; ++r) {
+        const float t = kernels::attn_temperature(static_cast<std::uint32_t>(3 + r), 0.5f, 4);
+        CHECK(t == (r == 0 ? 1.0f : static_cast<float>(std::log(2.0) * 0.5 + 1.0)));
+        for (std::size_t i = 0; i < 8; ++i) {
+            CHECK(out[r * 8 + i] == in[r * 8 + i] * t);
+        }
+    }
+}

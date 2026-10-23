@@ -299,8 +299,20 @@ TEST_CASE("llama_loader: rejects features it does not implement", "[llama][loade
     }
     {
         model_spec spec;
-        spec.keys["llama.rope.scaling.type"] = kv_string("llama.rope.scaling.type", "linear");
+        spec.keys["llama.rope.scaling.type"] = kv_string("llama.rope.scaling.type", "longrope");
         require_error(spec, model_errc::unsupported, "llama.rope.scaling.type");
+    }
+    {
+        model_spec spec;  // linear scaling by a real factor
+        spec.keys["llama.rope.scaling.type"] = kv_string("llama.rope.scaling.type", "linear");
+        spec.keys["llama.rope.scaling.factor"] = kv("llama.rope.scaling.factor", value_type::float32, 4.0f);
+        require_error(spec, model_errc::unsupported, "llama.rope.scaling.factor");
+    }
+    {
+        model_spec spec;  // linear with no factor is the identity, as in llama.cpp
+        spec.keys["llama.rope.scaling.type"] = kv_string("llama.rope.scaling.type", "linear");
+        loaded keep;
+        CHECK(load(spec, keep));
     }
     {
         model_spec spec;  // linear RoPE scaling, as llama.cpp applies it without a type key
@@ -485,4 +497,110 @@ TEST_CASE("llama_loader: qwen2 reads its own keys and rejects what llama.cpp doe
         model_spec spec("gemma");
         require_error(spec, model_errc::wrong_architecture, "general.architecture");
     }
+}
+
+TEST_CASE("llama_loader: mistral3 loads with YaRN, the attention temperature, and its biases",
+          "[llama][loader][mistral3]") {
+    {
+        model_spec spec("mistral3");  // no scaling keys: the Llama graph
+        loaded keep;
+        const auto m = load(spec, keep);
+        REQUIRE(m);
+        CHECK(m->config.arch == models::architecture::mistral3);
+        CHECK(m->config.rope == kernels::rope_mode::normal);
+        CHECK(m->config.rope_scaling.ext_factor == 0.0f);
+        CHECK(m->config.rope_scaling.attn_factor == 1.0f);
+        CHECK(count_ops<graph::op_attn_temperature>(m->graph) == 0);
+    }
+    model_spec spec("mistral3");  // as Ministral-3-3B declares them
+    spec.keys["mistral3.rope.scaling.type"] = kv_string("mistral3.rope.scaling.type", "yarn");
+    spec.keys["mistral3.rope.scaling.factor"] = kv("mistral3.rope.scaling.factor", value_type::float32, 16.0f);
+    spec.keys["mistral3.rope.scaling.original_context_length"] =
+        kv("mistral3.rope.scaling.original_context_length", value_type::uint32, std::uint32_t{16});
+    spec.keys["mistral3.rope.scaling.yarn_beta_fast"] =
+        kv("mistral3.rope.scaling.yarn_beta_fast", value_type::float32, 0.05f);
+    spec.keys["mistral3.rope.scaling.yarn_beta_slow"] =
+        kv("mistral3.rope.scaling.yarn_beta_slow", value_type::float32, 0.001f);
+    spec.keys["mistral3.rope.scaling.yarn_log_multiplier"] =
+        kv("mistral3.rope.scaling.yarn_log_multiplier", value_type::float32, 0.5f);
+    spec.keys["mistral3.attention.temperature_scale"] =
+        kv("mistral3.attention.temperature_scale", value_type::float32, 0.1f);
+    for (const char* b : {"attn_q.bias", "attn_output.bias", "ffn_gate.bias", "ffn_up.bias", "ffn_down.bias"}) {
+        const std::string name = std::string("blk.0.") + b;
+        const std::uint64_t n = std::string_view(b).starts_with("ffn_gate") || std::string_view(b).starts_with("ffn_up")
+                                    ? n_ff
+                                : std::string_view(b).starts_with("attn_q") ? n_head * head_dim
+                                                                            : n_embd;
+        spec.tensors[name] = {{n}};
+    }
+    {
+        loaded keep;
+        const auto m = load(spec, keep);
+        REQUIRE(m);
+        const auto& s = m->config.rope_scaling;
+        // llama.cpp's derivation (llama_context): factor 16, log multiplier 0.5.
+        const auto mscale = [](float f, float k) { return 0.1f * k * std::log(f) + 1.0f; };
+        float attn = mscale(16.0f, 1.0f) / mscale(16.0f, 0.5f);
+        attn *= 1.0f / (1.0f + 0.1f * std::log(16.0f));
+        CHECK(s.freq_scale == 1.0f / 16.0f);
+        CHECK(s.ext_factor == 1.0f);
+        CHECK(s.attn_factor == attn);
+        const auto dims = kernels::rope_yarn_corr_dims(head_dim, 16, 10000.0f, 0.05f, 0.001f);
+        CHECK(s.corr_low == dims[0]);
+        CHECK(s.corr_high == dims[1]);
+        CHECK(m->config.n_ctx_orig == 16);
+        CHECK(m->config.attn_temp_scale == 0.1f);
+        REQUIRE(count_ops<graph::op_attn_temperature>(m->graph) == 1);
+        for (const auto& n : m->graph.nodes()) {
+            if (const auto* t = std::get_if<graph::op_attn_temperature>(&n)) {
+                CHECK(t->floor_len == 16);  // llama.cpp: the original context
+            }
+        }
+        CHECK(count_ops<graph::op_add_bias>(m->graph) == 5);
+        graph::session sess{m->graph};
+        CHECK(sess.run({1, 0}));
+    }
+    {
+        model_spec bad = spec;  // Mistral 3 has no output bias
+        bad.tensors["output.bias"] = {{n_vocab}};
+        require_error(bad, model_errc::unsupported, "output.bias");
+    }
+    {
+        model_spec bad = spec;
+        bad.tensors["blk.0.ffn_down.bias"] = {{n_ff}};  // as wide as ff, not d
+        require_error(bad, model_errc::bad_tensor, "blk.0.ffn_down.bias");
+    }
+    {
+        model_spec bad = spec;
+        bad.tensors["blk.0.ffn_gate_inp.weight"] = {{n_embd, 4}};
+        require_error(bad, model_errc::unsupported, "blk.0.ffn_gate_inp.weight");
+    }
+    {
+        model_spec bad = spec;
+        bad.keys["mistral3.rope.scaling.original_context_length"] =
+            kv("mistral3.rope.scaling.original_context_length", value_type::uint32, std::uint32_t{0});
+        require_error(bad, model_errc::bad_value, "mistral3.rope.scaling.original_context_length");
+    }
+    {
+        model_spec bad = spec;  // YaRN only extends: a factor below 1 is not supported
+        bad.keys["mistral3.rope.scaling.factor"] = kv("mistral3.rope.scaling.factor", value_type::float32, 0.5f);
+        require_error(bad, model_errc::unsupported, "mistral3.rope.scaling.factor");
+    }
+}
+
+TEST_CASE("llama_loader: YaRN on other architectures takes llama.cpp's defaults", "[llama][loader][yarn]") {
+    model_spec spec;  // llama: beta fast/slow and the log multiplier are not read
+    spec.keys["llama.rope.scaling.type"] = kv_string("llama.rope.scaling.type", "yarn");
+    spec.keys["llama.rope.scaling.factor"] = kv("llama.rope.scaling.factor", value_type::float32, 4.0f);
+    spec.keys["llama.rope.scaling.yarn_beta_fast"] =
+        kv("llama.rope.scaling.yarn_beta_fast", value_type::float32, 0.05f);
+    spec.keys["llama.attention.temperature_scale"] = kv("llama.attention.temperature_scale", value_type::float32, 0.1f);
+    loaded keep;
+    const auto m = load(spec, keep);
+    REQUIRE(m);
+    const auto dims = kernels::rope_yarn_corr_dims(head_dim, 64, 10000.0f, 32.0f, 1.0f);  // n_ctx_train 64
+    CHECK(m->config.rope_scaling.corr_low == dims[0]);
+    CHECK(m->config.rope_scaling.corr_high == dims[1]);
+    CHECK(m->config.rope_scaling.attn_factor == 1.0f / (1.0f + 0.1f * std::log(4.0f)) * (0.1f * std::log(4.0f) + 1.0f));
+    CHECK(count_ops<graph::op_attn_temperature>(m->graph) == 0);  // Mistral 3's key only
 }

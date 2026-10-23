@@ -10,8 +10,8 @@
 /// State that outlives a run (the KV cache) is not a tensor either: a graph
 /// declares it as a state, the session allocates it apart from the arena, and
 /// the planner never sees it. Operations that depend on the step being
-/// decoded (embed reads its token; rope and attention read its position) get
-/// it from the session at run time.
+/// decoded (embed reads its token; rope, attn_temperature and attention read
+/// its position) get it from the session at run time.
 ///
 /// Model
 /// -----
@@ -31,7 +31,7 @@
 ///
 ///   node = std::variant<op_matmul, op_add, op_add_bias, op_mul, op_silu,
 ///                       op_softmax, op_rms_norm, op_embed, op_rope,
-///                       op_attention, op_last_row>
+///                       op_attn_temperature, op_attention, op_last_row>
 ///     each op names its operand and result tensors by tensor_id; op_matmul
 ///     and op_attention also name a scratch tensor, and op_attention the
 ///     state it reads and appends to
@@ -66,8 +66,8 @@
 ///                                                   — constrains nodes_, states_
 ///   I8: an op's operands and result agree in batching: element-wise ops
 ///       take operands that are both batched or both single-row (add_bias
-///       and rms_norm keep their operand's batching); embed,
-///       rope and attention work on batched tensors; last_row turns a
+///       and rms_norm keep their operand's batching); embed, rope,
+///       attn_temperature and attention work on batched tensors; last_row turns a
 ///       batched tensor into a single-row one
 ///                                                   — constrains nodes_, tensors_
 ///
@@ -188,6 +188,12 @@ struct op_rope {  ///< out = in with each head rotated by the step's position
     float theta_scale;                ///< base^(-2 / head_dim)
     std::vector<float> freq_factors;  ///< empty, or head_dim / 2 divisors of theta
     kernels::rope_mode mode;          ///< which elements form a pair
+    kernels::rope_scaling scaling;    ///< YaRN context scaling (default: none)
+};
+struct op_attn_temperature {  ///< out = in * (1 + scale * ln(floor(pos / floor_len) + 1)), per row
+    tensor_id in, out;
+    float scale;
+    std::size_t floor_len;
 };
 struct op_attention {  ///< append (k, v) to cache; out = causal attention of q over it
     tensor_id q, k, v, out, scratch;
@@ -209,6 +215,7 @@ using node = std::variant<op_matmul,
                           op_rms_norm,
                           op_embed,
                           op_rope,
+                          op_attn_temperature,
                           op_attention,
                           op_last_row>;
 
@@ -240,6 +247,9 @@ inline std::vector<tensor_id> operands(const node& n) {
             return {};
         }
         std::vector<tensor_id> operator()(const op_rope& o) const {
+            return {o.in};
+        }
+        std::vector<tensor_id> operator()(const op_attn_temperature& o) const {
             return {o.in};
         }
         std::vector<tensor_id> operator()(const op_attention& o) const {
@@ -496,15 +506,17 @@ public:
 
     /// x, viewed as heads of head_dim floats, each rotated by the run's
     /// position with theta_i = pos * base^(-2i / head_dim) / freq_factors[i],
-    /// pairing elements as mode says.
+    /// pairing elements as mode says and YaRN-scaled as scaling says.
     ///   Pre (checked): I6 (head_dim even, x.size a multiple of it); base and
     ///   every freq factor finite and positive; freq_factors empty or of size
-    ///   head_dim / 2.
+    ///   head_dim / 2; scaling's freq_scale and attn_factor finite and
+    ///   positive, its ext_factor and correction dims finite.
     tensor_id rope(tensor_id x,
                    std::size_t head_dim,
                    float base,
                    std::span<const float> freq_factors = {},
-                   kernels::rope_mode mode = kernels::rope_mode::normal) {
+                   kernels::rope_mode mode = kernels::rope_mode::normal,
+                   const kernels::rope_scaling& scaling = {}) {
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
@@ -513,7 +525,9 @@ public:
             return fail(graph_errc::bad_shape);  // I6, I8
         }
         const auto positive = [](float f) { return std::isfinite(f) && f > 0.0f; };
-        if (!positive(base) || !std::all_of(freq_factors.begin(), freq_factors.end(), positive)) {
+        if (!positive(base) || !std::all_of(freq_factors.begin(), freq_factors.end(), positive) ||
+            !positive(scaling.freq_scale) || !positive(scaling.attn_factor) || !std::isfinite(scaling.ext_factor) ||
+            !std::isfinite(scaling.corr_low) || !std::isfinite(scaling.corr_high)) {
             return fail(graph_errc::bad_parameter);
         }
         const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, true);
@@ -523,7 +537,29 @@ public:
                                            head_dim,
                                            kernels::rope_theta_scale(base, head_dim),
                                            std::vector<float>(freq_factors.begin(), freq_factors.end()),
-                                           mode});
+                                           mode,
+                                           scaling});
+        }
+        return out;
+    }
+
+    /// x with each row (token) scaled by its position's attention
+    /// temperature, 1 + scale * ln(floor(pos / floor_len) + 1), as llama.cpp
+    /// scales Q for Llama 4 and Mistral 3.
+    ///   Pre (checked): x batched (I8); scale finite; floor_len >= 1.
+    tensor_id attn_temperature(tensor_id x, float scale, std::size_t floor_len) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        if (!batched(x)) {
+            return fail(graph_errc::bad_shape);  // I8
+        }
+        if (!std::isfinite(scale) || floor_len == 0) {
+            return fail(graph_errc::bad_parameter);
+        }
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, true);
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_attn_temperature{x, out, scale, floor_len});
         }
         return out;
     }

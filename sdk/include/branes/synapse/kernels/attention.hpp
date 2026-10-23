@@ -8,8 +8,11 @@
 ///
 ///   rope:      theta for pair i is pos * theta_scale^i / freq_factor[i],
 ///              built by repeated float multiplication exactly as ggml's
-///              rope cache does, then (x0, x1) rotated by theta ("normal"
-///              mode: adjacent pairs, which is how GGUF stores Llama's Q, K).
+///              rope cache does, then (x0, x1) rotated by theta. Pair i is
+///              (x[2i], x[2i+1]) in "normal" mode (how GGUF stores Llama's
+///              Q, K) and (x[i], x[i + head_dim/2]) in "neox" mode (Qwen2).
+///              With YaRN scaling (rope_scaling), theta and the rotation's
+///              magnitude follow ggml's rope_yarn, operation for operation.
 ///   attention: K and V are stored as F16; q is rounded to F16 before the
 ///              q.k dot (ggml's f16 mul_mat converts its f32 operand); the
 ///              softmax runs in float with a double sum; the probabilities
@@ -46,18 +49,46 @@ enum class rope_mode : std::uint8_t {
     neox,    ///< pair i is (x[i], x[i + head_dim/2]): GPT-NeoX, Qwen2
 };
 
+/// YaRN context scaling of RoPE (ggml's freq_scale, ext_factor, attn_factor
+/// and correction dimensions). The default is no scaling: theta and the
+/// rotation are then exactly those of plain RoPE.
+struct rope_scaling {
+    float freq_scale = 1.0f;   ///< 1 / scaling factor: theta_interp = freq_scale * theta
+    float ext_factor = 0.0f;   ///< weight of the extrapolation ramp (1 for YaRN, 0 off)
+    float attn_factor = 1.0f;  ///< magnitude scale of cos and sin
+    float corr_low = 0.0f;     ///< pairs below are extrapolated ...
+    float corr_high = 0.0f;    ///< ... above interpolated, ramped in between
+};
+
+/// ggml_rope_yarn_corr_dims: the pair range [low, high] over which YaRN ramps
+/// from extrapolation to interpolation, for a model trained on n_ctx_orig
+/// positions. Computed in float, as ggml does.
+inline std::array<float, 2>
+rope_yarn_corr_dims(std::size_t n_dims, std::size_t n_ctx_orig, float base, float beta_fast, float beta_slow) noexcept {
+    constexpr float pi = 3.14159265358979323846f;
+    const auto corr_dim = [&](float n_rot) {
+        return static_cast<float>(n_dims) * std::log(static_cast<float>(n_ctx_orig) / (n_rot * 2 * pi)) /
+               (2 * std::log(base));
+    };
+    const float start = std::floor(corr_dim(beta_fast));
+    const float end = std::ceil(corr_dim(beta_slow));
+    return {std::max(0.0f, start), std::min(static_cast<float>(n_dims) - 1, end)};
+}
+
 /// Rotate every head of x by its position: pair i of each head by
-/// theta_i = pos * theta_scale^i / freq_factors[i]. x holds heads of
-/// head_dim floats; mode selects the pairs.
+/// theta_i = pos * theta_scale^i / freq_factors[i], YaRN-scaled when
+/// `scaling` says so. x holds heads of head_dim floats; mode selects the pairs.
 ///   Pre: x.size() == out.size(), head_dim even and non-zero, x.size() % head_dim == 0,
 ///        freq_factors empty or of size head_dim / 2; out does not alias x.
+///   Post: with the default scaling, exactly plain RoPE.
 inline void rope(std::span<const float> x,
                  std::span<float> out,
                  std::size_t head_dim,
                  std::uint32_t pos,
                  float theta_scale,
                  std::span<const float> freq_factors,
-                 rope_mode mode = rope_mode::normal) noexcept {
+                 rope_mode mode = rope_mode::normal,
+                 const rope_scaling& scaling = {}) noexcept {
     assert(x.size() == out.size() && head_dim != 0 && head_dim % 2 == 0 && x.size() % head_dim == 0);  // Pre
     assert(freq_factors.empty() || freq_factors.size() == head_dim / 2);                               // Pre
     // Pair i is (x[a], x[a + offset]) with a = stride * i.
@@ -66,9 +97,21 @@ inline void rope(std::span<const float> x,
     float theta = static_cast<float>(pos);
     for (std::size_t i = 0; i < head_dim / 2; ++i) {
         const float ff = freq_factors.empty() ? 1.0f : freq_factors[i];
-        const float t = theta / ff;
-        const float c = std::cos(t);
-        const float s = std::sin(t);
+        // ggml's rope_yarn. Unscaled, theta_interp == theta_extrap and
+        // mscale == 1 exactly, so this is plain RoPE.
+        const float theta_extrap = theta / ff;
+        const float theta_interp = scaling.freq_scale * theta_extrap;
+        float t = theta_interp;
+        float mscale = scaling.attn_factor;
+        if (scaling.ext_factor != 0.0f) {
+            const float y =
+                (static_cast<float>(i) - scaling.corr_low) / std::max(0.001f, scaling.corr_high - scaling.corr_low);
+            const float ramp_mix = (1 - std::min(1.0f, std::max(0.0f, y))) * scaling.ext_factor;
+            t = theta_interp * (1 - ramp_mix) + theta_extrap * ramp_mix;
+            mscale *= 1.0f + 0.1f * std::log(1.0f / scaling.freq_scale);
+        }
+        const float c = std::cos(t) * mscale;
+        const float s = std::sin(t) * mscale;
         const std::size_t a = stride * i;
         for (std::size_t h = 0; h < x.size(); h += head_dim) {
             const float x0 = x[h + a];

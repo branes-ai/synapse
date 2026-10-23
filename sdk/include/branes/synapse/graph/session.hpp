@@ -291,7 +291,13 @@ private:
     }
     void execute(const op_rope& o) noexcept {
         for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
-            kernels::rope(row(o.in, i), row(o.out, i), o.head_dim, position(i), o.theta_scale, o.freq_factors, o.mode);
+            kernels::rope(
+                row(o.in, i), row(o.out, i), o.head_dim, position(i), o.theta_scale, o.freq_factors, o.mode, o.scaling);
+        }
+    }
+    void execute(const op_attn_temperature& o) noexcept {
+        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+            kernels::scale(row(o.in, i), kernels::attn_temperature(position(i), o.scale, o.floor_len), row(o.out, i));
         }
     }
     void execute(const op_attention& o) noexcept {

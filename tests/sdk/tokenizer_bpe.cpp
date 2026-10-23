@@ -218,6 +218,26 @@ TEST_CASE("tokenizer_bpe: the Qwen2 pre-tokenizer", "[tokenizer][bpe][qwen2]") {
     }
 }
 
+TEST_CASE("tokenizer_bpe: the Tekken pre-tokenizer", "[tokenizer][bpe][tekken]") {
+    // As in the Qwen2 case, "abc" is a token no merge builds.
+    vocab_spec spec;
+    spec.tokens.insert(spec.tokens.end() - 1, "abc");
+    spec.keys["tokenizer.ggml.bos_token_id"] =
+        kv("tokenizer.ggml.bos_token_id", value_type::uint32, std::uint32_t{258});
+    std::vector<std::int32_t> types(spec.tokens.size(), 1);
+    types.back() = 3;
+    spec.keys["tokenizer.ggml.token_type"] = int32_array("tokenizer.ggml.token_type", types);
+    spec.keys["tokenizer.ggml.pre"] = kv_string("tokenizer.ggml.pre", "tekken");
+    std::vector<std::byte> keep;
+    const auto t = load(spec, keep);
+    REQUIRE(t);
+    CHECK(t->adds_bos());                                             // llama.cpp's default for tekken
+    CHECK(t->encode("abc") == std::vector<std::uint32_t>{258, 257});  // BOS, then ignore_merges
+    // Case splits words: "abcABC" is "abc" + "ABC", so "abc" is still whole.
+    CHECK(t->encode("abcABC", {.add_special = false}) == std::vector<std::uint32_t>{257, 'A', 'B', 'C'});
+    CHECK(t->decode(t->encode("x/y 12 aBc", {.add_special = false})) == "x/y 12 aBc");
+}
+
 TEST_CASE("tokenizer_bpe: decode(encode(s)) == s for random valid UTF-8 (T2)", "[tokenizer][bpe]") {
     std::mt19937 rng(31);
     // Draw from ASCII, Latin-1, CJK, emoji and whitespace, weighted to ASCII.
