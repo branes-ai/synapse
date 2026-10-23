@@ -4,7 +4,7 @@
 ///
 /// tokenizer.ggml.model selects the algorithm:
 ///
-///   "gpt2"   byte-level BPE (bpe.hpp; Llama 3 and Qwen2 pre-tokenizers)
+///   "gpt2"   byte-level BPE (bpe.hpp; Llama 3, Qwen2 and Tekken pre-tokenizers)
 ///   "llama"  SentencePiece (spm.hpp; Llama 2, TinyLlama, Mistral v1)
 ///
 /// Anything else is unsupported_model. Both report errors instead of

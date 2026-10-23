@@ -59,3 +59,15 @@ TEST_CASE("tokenizer_golden: encode and decode match llama.cpp with the Qwen2 pr
     const std::string dir = SYNAPSE_TEST_DATA_DIR;
     CHECK(synapse_test::check_tokenizer_golden(dir + "/qwen2_vocab.gguf", dir + "/qwen2_golden.gguf") >= 50);
 }
+
+// tests/data/tekken_vocab.gguf is the synthetic vocabulary with Mistral's
+// Tekken pre-tokenizer (tokenizer.ggml.pre = "tekken": letter runs split on
+// case, one digit per word, ignore_merges, BOS), and tekken_golden.gguf
+// holds llama.cpp's tokenizations of the llama-bpe test vectors, synapse's
+// BPE edge cases, and casing cases (CamelCase, all-caps runs, non-ASCII
+// upper and lower case, combining marks, slashes).
+TEST_CASE("tokenizer_golden: encode and decode match llama.cpp with the Tekken pre-tokenizer",
+          "[tokenizer][golden][tekken]") {
+    const std::string dir = SYNAPSE_TEST_DATA_DIR;
+    CHECK(synapse_test::check_tokenizer_golden(dir + "/tekken_vocab.gguf", dir + "/tekken_golden.gguf") >= 70);
+}

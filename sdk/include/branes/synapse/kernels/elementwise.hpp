@@ -15,6 +15,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <span>
 
 namespace branes::synapse::kernels {
@@ -46,6 +47,24 @@ inline void mul(std::span<const float> a, std::span<const float> b, std::span<fl
     for (std::size_t i = 0; i < out.size(); ++i) {
         out[i] = a[i] * b[i];
     }
+}
+
+/// out = x * s.  Pre: equal sizes.
+inline void scale(std::span<const float> x, float s, std::span<float> out) noexcept {
+    assert(x.size() == out.size());  // Pre
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = x[i] * s;
+    }
+}
+
+/// The attention temperature of position pos: 1 + scale * ln(floor(pos /
+/// floor_len) + 1), computed as llama.cpp's llm_graph_input_attn_temp does
+/// (a float quotient, the logarithm in double, rounded to float).
+///   Pre: floor_len >= 1.
+inline float attn_temperature(std::uint32_t pos, float scale, std::size_t floor_len) noexcept {
+    assert(floor_len >= 1);  // Pre
+    const float q = std::floor(static_cast<float>(pos) / static_cast<float>(floor_len));
+    return static_cast<float>(std::log(q + 1.0) * scale + 1.0);
 }
 
 /// out = x * sigmoid(x).  Pre: equal sizes.

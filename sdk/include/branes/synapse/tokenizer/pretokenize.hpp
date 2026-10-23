@@ -1,6 +1,6 @@
 #pragma once
 /// @file pretokenize.hpp
-/// @brief The Llama-3 and Qwen2 pre-tokenizers: split text into the words BPE merges within.
+/// @brief The Llama-3, Qwen2 and Tekken pre-tokenizers: split text into the words BPE merges within.
 ///
 /// Implements the split regex of Llama 3's tokenizer.json,
 ///
@@ -12,6 +12,17 @@
 /// Qwen2's regex is the same with \p{N} in place of \p{N}{1,3}: each digit
 /// is a word of its own. Alternatives are tried in order at each position, so
 /// the result is the regex's leftmost-first match sequence.
+///
+/// Tekken (Mistral Nemo, Mistral Small 3, Ministral 3) splits on letter case.
+/// llama.cpp runs it through std::regex as
+///
+///   p?U*L+ | p?U+L* | \p{N} | ?[^\s\p{L}\p{N}]+[\r\n/]* | \s*[\r\n]+
+///   | \s+(?!\S) | \s+          with p = [^\r\n\p{L}\p{N}],
+///
+/// U a letter other than a-z and L a letter other than A-Z (its stand-in for
+/// \p{Lu}... and \p{Ll}...: a non-ASCII letter is both), and no
+/// contractions. split_words reproduces std::regex's backtracking order: U*
+/// gives back letters until L+ can match.
 
 #include <branes/synapse/tokenizer/unicode.hpp>
 
@@ -26,12 +37,14 @@ namespace branes::synapse::tokenizer {
 enum class pre_style : std::uint8_t {
     llama3,  ///< digits in runs of up to 3
     qwen2,   ///< one digit per word
+    tekken,  ///< one digit per word; letter runs split on case; no contractions
 };
 
 /// Lengths, in code points, of the consecutive words of cpts (they sum to
 /// cpts.size(); none is empty).
 inline std::vector<std::size_t> split_words(std::span<const std::uint32_t> cpts, pre_style style) {
     const std::size_t max_digits = style == pre_style::llama3 ? 3 : 1;
+    const bool tekken = style == pre_style::tekken;
     std::vector<std::size_t> words;
     const std::size_t end = cpts.size();
     constexpr std::uint32_t out_of_range = 0xFFFFFFFF;
@@ -49,11 +62,51 @@ inline std::vector<std::size_t> split_words(std::span<const std::uint32_t> cpts,
         prev = to;
     };
 
+    // Tekken's stand-ins for upper- and lower-case letters.
+    const auto upper = [&](std::size_t p) { return letter(p) && !(cpts[p] >= 'a' && cpts[p] <= 'z'); };
+    const auto lower_case = [&](std::size_t p) { return letter(p) && !(cpts[p] >= 'A' && cpts[p] <= 'Z'); };
+
     for (std::size_t pos = 0; pos < end;) {
         const std::uint32_t c = cpts[pos];
 
+        if (tekken) {
+            // p?: a non-letter, non-number prefix other than \r \n. Without
+            // it the match would start at that same non-letter and fail, so
+            // the regex's retry without the prefix never succeeds.
+            const bool prefix = !(c == '\r' || c == '\n' || letter(pos) || number(pos));
+            const std::size_t q = prefix ? pos + 1 : pos;
+            if (letter(q) && (prefix || letter(pos))) {
+                std::size_t u = 0;  // the greedy U* run
+                while (upper(q + u)) {
+                    ++u;
+                }
+                // p?U*L+: U* backs off until an L follows.
+                std::size_t k = u + 1;
+                while (k > 0 && !lower_case(q + k - 1)) {
+                    --k;
+                }
+                if (k > 0) {
+                    std::size_t e = q + k - 1;
+                    while (lower_case(e)) {
+                        ++e;
+                    }
+                    emit(pos = e);
+                    continue;
+                }
+                // p?U+L*
+                if (u > 0) {
+                    std::size_t e = q + u;
+                    while (lower_case(e)) {
+                        ++e;
+                    }
+                    emit(pos = e);
+                    continue;
+                }
+            }
+        }
+
         // (?i:'s|'t|'re|'ve|'m|'ll|'d)
-        if (c == '\'' && pos + 1 < end) {
+        if (!tekken && c == '\'' && pos + 1 < end) {
             const std::uint32_t n1 = lower(cpt(pos + 1));
             if (n1 == 's' || n1 == 't' || n1 == 'm' || n1 == 'd') {
                 emit(pos += 2);
@@ -69,7 +122,7 @@ inline std::vector<std::size_t> split_words(std::span<const std::uint32_t> cpts,
         }
 
         // [^\r\n\p{L}\p{N}]?\p{L}+
-        if (!(c == '\r' || c == '\n' || number(pos)) && (letter(pos) || letter(pos + 1))) {
+        if (!tekken && !(c == '\r' || c == '\n' || number(pos)) && (letter(pos) || letter(pos + 1))) {
             ++pos;
             while (letter(pos)) {
                 ++pos;
@@ -99,7 +152,7 @@ inline std::vector<std::size_t> split_words(std::span<const std::uint32_t> cpts,
             while (other(pos)) {
                 ++pos;
             }
-            while (cpt(pos) == '\r' || cpt(pos) == '\n') {
+            while (cpt(pos) == '\r' || cpt(pos) == '\n' || (tekken && cpt(pos) == '/')) {
                 ++pos;
             }
             emit(pos);

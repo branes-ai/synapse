@@ -14,6 +14,11 @@ Two modes:
   python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
       [--build-dir DIR] --pre qwen2 --cases qwen2 synthetic tests/data/qwen2_vocab.gguf tests/data/qwen2_golden.gguf
 
+  # and with Tekken's (Mistral Nemo / Small 3 / Ministral 3: letter runs split
+  # on case, single digits), on the BPE test vectors plus casing cases
+  python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
+      [--build-dir DIR] --pre tekken --cases tekken synthetic tests/data/tekken_vocab.gguf tests/data/tekken_golden.gguf
+
   # golden tokenizations for an existing vocabulary (e.g. llama.cpp's
   # models/ggml-vocab-llama-bpe.gguf, or a full model), for the opt-in test
   python3 scripts/gen_tokenizer_fixture.py --llama-cpp /path/to/llama.cpp \\
@@ -25,7 +30,8 @@ Two modes:
       [--build-dir DIR] --cases spm golden tests/data/spm_vocab.gguf tests/data/spm_golden.gguf
 
 The test cases are llama.cpp's own tokenizer test vectors
-(models/ggml-vocab-{llama-bpe,llama-spm,qwen2}.gguf.inp, per --cases) followed by
+(models/ggml-vocab-{llama-bpe,llama-spm,qwen2}.gguf.inp, per --cases; Tekken
+has none of its own and uses llama-bpe's) followed by
 synapse's additional edge cases for that tokenizer family. The pre-tokenizer's behaviour does not depend on the vocabulary, so
 the small vocabulary exercises it fully; the merges exercise BPE.
 """
@@ -57,6 +63,14 @@ def tokenize(text):\n    return [t for t in text.split() if t]\n\tindented\r\nwi
     four spaces, two  spaces,   three, and trailing   \n
 """
 
+# Added to the corpus for the Tekken vocabulary. Training splits words with
+# " ?\w+", not Tekken's case-splitting regex, so these teach merges that
+# span case boundaries ("oW", "LH", "ÉC", ...): only then does the
+# pre-tokenizer's split show in the tokens llama.cpp produces.
+TEKKEN_CORPUS = " ".join(
+    ["HelloWorld helloWorld HELLOworld XMLHttpRequest iPhone McDonald ÉCOLE École éCOLE",
+     "ПриветМир ПРИВЕТмир ΑθήναΑΘΗΝΑ camelCase PascalCase SCREAMINGcase ABCdef straßeSTRASSE"] * 6)
+
 SPECIALS = [("<|begin_of_text|>", 3), ("<|end_of_text|>", 3), ("<|eot_id|>", 3), ("<|custom|>", 4)]
 
 EXTRA_CASES = [
@@ -84,6 +98,21 @@ EXTRA_CASES = [
     "",
 ]
 
+
+# Tekken-specific cases: its letter runs split on case, with llama.cpp's
+# approximation (a non-ASCII letter is both upper and lower case), and "/"
+# kept after punctuation runs.
+TEKKEN_EXTRA_CASES = [
+    "HelloWorld helloWorld HELLOworld XMLHttpRequest iPhone McDonald's",
+    "ÉCOLE École éCOLE ÀBCdef straßeSTRASSE ǅungla ǅUNGLA",
+    "ПриветМир ПРИВЕТмир ΑθήναΑΘΗΝΑ Ωmega",
+    "camelCase snake_case SCREAMING_CASE kebab-case PascalCase",
+    "a/b/c path/to/file ../up //double\n/// 1/2 ?/!/",
+    "e\u0301cole naïve n\u0303 MIXED\u0301case",
+    "x1Y2z3 A1b ABC123def 中文English漢字MIXED",
+    "'s 'S 'll I'M can't WON'T",
+    "end.\n/next !\r\n//x ;\n\n/ a\n/b",
+]
 
 # SentencePiece-specific cases: the space prefix around special tokens, the
 # U+2581 escape, byte fallback for characters outside the vocabulary, and
@@ -152,7 +181,7 @@ def write_vocab(llama: Path, path: Path, pre: str) -> None:
 
     byte_map = gpt2_bytes_to_unicode()
     tokens = [byte_map[b] for b in range(256)]
-    merges = bpe_train(CORPUS, 400)
+    merges = bpe_train(CORPUS + ("\n" + TEKKEN_CORPUS if pre == "tekken" else ""), 400)
     for a, b in merges:
         if a + b not in tokens:
             tokens.append(a + b)
@@ -185,13 +214,13 @@ def write_vocab(llama: Path, path: Path, pre: str) -> None:
 
 
 UPSTREAM_CASES = {"bpe": "ggml-vocab-llama-bpe.gguf.inp", "spm": "ggml-vocab-llama-spm.gguf.inp",
-                  "qwen2": "ggml-vocab-qwen2.gguf.inp"}
+                  "qwen2": "ggml-vocab-qwen2.gguf.inp", "tekken": "ggml-vocab-llama-bpe.gguf.inp"}
 
 
 def cases_file(llama: Path, directory: Path, family: str) -> Path:
     upstream = (llama / "models" / UPSTREAM_CASES[family]).read_bytes()
     # Lone surrogates above stand for raw invalid bytes.
-    cases = SPM_EXTRA_CASES if family == "spm" else EXTRA_CASES
+    cases = SPM_EXTRA_CASES if family == "spm" else EXTRA_CASES + (TEKKEN_EXTRA_CASES if family == "tekken" else [])
     extra = b"".join(c.encode("utf-8", "surrogateescape") + SEPARATOR.encode() for c in cases)
     path = directory / "cases.txt"
     path.write_bytes(upstream + extra)
@@ -204,7 +233,7 @@ def main() -> None:
     ap.add_argument("--build-dir", type=Path, help="llama.cpp build directory (default: a temp dir)")
     ap.add_argument("--cases", choices=sorted(UPSTREAM_CASES), default="bpe",
                     help="tokenizer family whose test vectors to use (default: bpe)")
-    ap.add_argument("--pre", choices=["llama-bpe", "qwen2"], default="llama-bpe",
+    ap.add_argument("--pre", choices=["llama-bpe", "qwen2", "tekken"], default="llama-bpe",
                     help="pre-tokenizer of the synthetic vocabulary (default: llama-bpe)")
     ap.add_argument("mode", choices=["synthetic", "golden"])
     ap.add_argument("vocab", type=Path, help="vocabulary to write (synthetic) or read (golden)")

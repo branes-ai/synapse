@@ -3,10 +3,12 @@
 // llama_golden.)
 
 #include <branes/synapse/kernels/attention.hpp>
+#include <branes/synapse/kernels/elementwise.hpp>
 #include <branes/synapse/numeric/half.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -111,6 +113,66 @@ TEST_CASE("kernels_attention: neox rope rotates (x[i], x[i + d/2]) by pos * base
         CHECK(neox[i] == normal[2 * i]);
         CHECK(neox[i + half] == normal[2 * i + 1]);
     }
+}
+
+TEST_CASE("kernels_attention: YaRN rope ramps from extrapolated to interpolated theta", "[kernels][rope][yarn]") {
+    constexpr std::size_t head_dim = 64, half = head_dim / 2;
+    constexpr float base = 10000.0f, factor = 4.0f;
+    std::mt19937 rng(7);
+    const auto x = normal_vector(2 * head_dim, rng);
+    const float theta_scale = kernels::rope_theta_scale(base, head_dim);
+    const auto dims = kernels::rope_yarn_corr_dims(head_dim, 4, base, 0.05f, 0.001f);
+    CHECK(dims[0] == 8.0f);   // floor(64 ln(4 / (0.05 * 2 pi)) / (2 ln 1e4)) = floor(8.84)
+    CHECK(dims[1] == 23.0f);  // ceil(22.4)
+    kernels::rope_scaling sc;
+    sc.freq_scale = 1.0f / factor;
+    sc.ext_factor = 1.0f;
+    sc.attn_factor = 0.9f;
+    sc.corr_low = dims[0];
+    sc.corr_high = dims[1];
+    for (std::uint32_t pos : {0u, 3u, 50u}) {
+        std::vector<float> out(x.size());
+        kernels::rope(x, out, head_dim, pos, theta_scale, {}, kernels::rope_mode::normal, sc);
+        // ggml's rope_yarn in double.
+        const double mscale = 0.9 * (1.0 + 0.1 * std::log(static_cast<double>(factor)));
+        for (std::size_t h = 0; h < 2; ++h) {
+            for (std::size_t i = 0; i < half; ++i) {
+                const double extrap =
+                    pos * std::pow(static_cast<double>(base), -2.0 * static_cast<double>(i) / head_dim);
+                const double interp = extrap / factor;
+                const double y = (static_cast<double>(i) - dims[0]) / (dims[1] - dims[0]);
+                const double ramp = 1.0 - std::min(1.0, std::max(0.0, y));
+                const double theta = interp * (1 - ramp) + extrap * ramp;
+                const double x0 = x[h * head_dim + 2 * i], x1 = x[h * head_dim + 2 * i + 1];
+                const double tol = 1e-5 * (1.0 + pos);
+                INFO("pos " << pos << " pair " << i);
+                CHECK(std::fabs(out[h * head_dim + 2 * i] - mscale * (x0 * std::cos(theta) - x1 * std::sin(theta))) <
+                      tol);
+                CHECK(std::fabs(out[h * head_dim + 2 * i + 1] -
+                                mscale * (x0 * std::sin(theta) + x1 * std::cos(theta))) < tol);
+            }
+        }
+    }
+    // Without the ramp (ext_factor 0), theta is only interpolated.
+    sc.ext_factor = 0.0f;
+    sc.attn_factor = 1.0f;
+    std::vector<float> scaled(x.size()), plain(x.size());
+    kernels::rope(x, scaled, head_dim, 40, theta_scale, {}, kernels::rope_mode::normal, sc);
+    std::vector<float> factors(half, factor);  // theta / factor, the same division
+    kernels::rope(x, plain, head_dim, 40, theta_scale, factors);
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        CHECK(std::fabs(scaled[i] - plain[i]) < 1e-6);
+    }
+}
+
+TEST_CASE("kernels_attention: attention temperature follows llama.cpp's formula", "[kernels][temperature]") {
+    for (std::uint32_t pos : {0u, 3u, 4u, 7u, 8u, 15u, 16383u, 16384u, 100000u}) {
+        const double expected = std::log(std::floor(pos / 16384.0) + 1.0) * 0.1 + 1.0;
+        INFO("pos " << pos);
+        CHECK(kernels::attn_temperature(pos, 0.1f, 16384) == static_cast<float>(expected));
+    }
+    CHECK(kernels::attn_temperature(16383, 0.1f, 16384) == 1.0f);  // below the floor: the identity
+    CHECK(kernels::attn_temperature(4, 0.5f, 4) == static_cast<float>(std::log(2.0) * 0.5 + 1.0));
 }
 
 TEST_CASE("kernels_attention: grouped-query attention over a growing F16 cache", "[kernels][attention]") {
