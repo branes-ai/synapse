@@ -14,6 +14,13 @@
 //       quantized on either side, so the logits must agree to float rounding
 //       (this checks the graph's semantics apart from quantization noise).
 //
+//   oracle qwen2-tiny <model.gguf> <golden.gguf>
+//   oracle qwen2-tiny-f32 <model.gguf> <golden.gguf>
+//       The same two models as Qwen2 (general.architecture "qwen2"): NEOX
+//       RoPE with base 1e6 and no frequency factors, and F32 Q/K/V biases
+//       and an output bias. The quantized one ties its output to the
+//       embedding; the F32 one has its own output matrix.
+//
 //   oracle logits <model.gguf> <golden.gguf> <token>...
 //       Decodes the given tokens through an existing model.
 //
@@ -60,6 +67,8 @@ struct tiny_config {
     uint32_t n_embd, n_ff, n_vocab;
     ggml_type embd;
     layer_types layers[n_layer];
+    const char* arch = "llama";
+    ggml_type output = GGML_TYPE_COUNT;  // its own output matrix, or COUNT for tied
 
     uint32_t head_dim() const {
         return n_embd / n_head;
@@ -78,6 +87,14 @@ constexpr tiny_config quantized{
 constexpr layer_types all_f32{
     GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32};
 constexpr tiny_config plain{64, 128, 128, GGML_TYPE_F32, {all_f32, all_f32}};
+
+constexpr tiny_config qwen2_quantized{quantized.n_embd,
+                                      quantized.n_ff,
+                                      quantized.n_vocab,
+                                      quantized.embd,
+                                      {quantized.layers[0], quantized.layers[1]},
+                                      "qwen2"};
+constexpr tiny_config qwen2_plain{64, 128, 128, GGML_TYPE_F32, {all_f32, all_f32}, "qwen2", GGML_TYPE_F32};
 
 std::mt19937 rng(20261021);
 
@@ -111,31 +128,44 @@ void write_tiny_model(const tiny_config& cfg, const char* path) {
     ggml_context* ctx = ggml_init(params);
     gguf_context* out = gguf_init_empty();
 
-    gguf_set_val_str(out, "general.architecture", "llama");
-    gguf_set_val_str(out, "general.name", "synapse tiny llama (random weights)");
-    gguf_set_val_u32(out, "llama.block_count", n_layer);
-    gguf_set_val_u32(out, "llama.context_length", n_ctx_train);
-    gguf_set_val_u32(out, "llama.embedding_length", n_embd);
-    gguf_set_val_u32(out, "llama.feed_forward_length", n_ff);
-    gguf_set_val_u32(out, "llama.attention.head_count", n_head);
-    gguf_set_val_u32(out, "llama.attention.head_count_kv", n_head_kv);
-    gguf_set_val_f32(out, "llama.rope.freq_base", 10000.0f);
-    gguf_set_val_f32(out, "llama.attention.layer_norm_rms_epsilon", 1e-5f);
-    gguf_set_val_u32(out, "llama.rope.dimension_count", head_dim);
-    gguf_set_val_u32(out, "llama.vocab_size", n_vocab);
+    const std::string arch = cfg.arch;
+    const bool qwen2 = arch == "qwen2";
+    const auto key = [&](const char* suffix) { return arch + "." + suffix; };
+    gguf_set_val_str(out, "general.architecture", arch.c_str());
+    gguf_set_val_str(out, "general.name", ("synapse tiny " + arch + " (random weights)").c_str());
+    gguf_set_val_u32(out, key("block_count").c_str(), n_layer);
+    gguf_set_val_u32(out, key("context_length").c_str(), n_ctx_train);
+    gguf_set_val_u32(out, key("embedding_length").c_str(), n_embd);
+    gguf_set_val_u32(out, key("feed_forward_length").c_str(), n_ff);
+    gguf_set_val_u32(out, key("attention.head_count").c_str(), n_head);
+    gguf_set_val_u32(out, key("attention.head_count_kv").c_str(), n_head_kv);
+    gguf_set_val_f32(out, key("rope.freq_base").c_str(), qwen2 ? 1000000.0f : 10000.0f);
+    gguf_set_val_f32(out, key("attention.layer_norm_rms_epsilon").c_str(), qwen2 ? 1e-6f : 1e-5f);
+    if (!qwen2) {  // Qwen2 files leave it to default to the head dimension
+        gguf_set_val_u32(out, key("rope.dimension_count").c_str(), head_dim);
+    }
+    gguf_set_val_u32(out, key("vocab_size").c_str(), n_vocab);
     gguf_set_val_str(out, "tokenizer.ggml.model", "none");
 
     const float wscale = 1.0f / std::sqrt(static_cast<float>(n_embd));
     add_weight(ctx, out, "token_embd.weight", cfg.embd, n_vocab, n_embd, 0.0f, 0.5f);
     add_weight(ctx, out, "output_norm.weight", GGML_TYPE_F32, 1, n_embd, 1.0f, 0.1f);
-
-    // llama3-style frequency factors: 1 for high frequencies, up to 8 for low.
-    ggml_tensor* rf = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, head_dim / 2);
-    ggml_set_name(rf, "rope_freqs.weight");
-    for (uint32_t i = 0; i < head_dim / 2; ++i) {
-        static_cast<float*>(rf->data)[i] = 1.0f + 7.0f * static_cast<float>(i) / static_cast<float>(head_dim / 2 - 1);
+    if (cfg.output != GGML_TYPE_COUNT) {
+        add_weight(ctx, out, "output.weight", cfg.output, n_vocab, n_embd, 0.0f, wscale);
     }
-    gguf_add_tensor(out, rf);
+
+    if (qwen2) {
+        add_weight(ctx, out, "output.bias", GGML_TYPE_F32, 1, n_vocab, 0.0f, 0.5f);
+    } else {
+        // llama3-style frequency factors: 1 for high frequencies, up to 8 for low.
+        ggml_tensor* rf = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, head_dim / 2);
+        ggml_set_name(rf, "rope_freqs.weight");
+        for (uint32_t i = 0; i < head_dim / 2; ++i) {
+            static_cast<float*>(rf->data)[i] =
+                1.0f + 7.0f * static_cast<float>(i) / static_cast<float>(head_dim / 2 - 1);
+        }
+        gguf_add_tensor(out, rf);
+    }
 
     for (uint32_t l = 0; l < n_layer; ++l) {
         const std::string p = "blk." + std::to_string(l) + ".";
@@ -145,6 +175,11 @@ void write_tiny_model(const tiny_config& cfg, const char* path) {
         add_weight(ctx, out, p + "attn_k.weight", t.k, n_head_kv * head_dim, n_embd, 0.0f, wscale);
         add_weight(ctx, out, p + "attn_v.weight", t.v, n_head_kv * head_dim, n_embd, 0.0f, wscale);
         add_weight(ctx, out, p + "attn_output.weight", t.o, n_embd, n_head * head_dim, 0.0f, wscale);
+        if (qwen2) {  // large enough to move the rotated Q and K well off zero
+            add_weight(ctx, out, p + "attn_q.bias", GGML_TYPE_F32, 1, n_head * head_dim, 0.0f, 0.5f);
+            add_weight(ctx, out, p + "attn_k.bias", GGML_TYPE_F32, 1, n_head_kv * head_dim, 0.0f, 0.5f);
+            add_weight(ctx, out, p + "attn_v.bias", GGML_TYPE_F32, 1, n_head_kv * head_dim, 0.0f, 0.5f);
+        }
         add_weight(ctx, out, p + "ffn_norm.weight", GGML_TYPE_F32, 1, n_embd, 1.0f, 0.1f);
         add_weight(ctx, out, p + "ffn_gate.weight", t.gate, n_ff, n_embd, 0.0f, wscale);
         add_weight(ctx, out, p + "ffn_up.weight", t.up, n_ff, n_embd, 0.0f, wscale);
@@ -312,8 +347,17 @@ void write_tokenizer_golden(const char* vocab_path, const char* cases_path, cons
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc == 4 && (std::strcmp(argv[1], "tiny") == 0 || std::strcmp(argv[1], "tiny-f32") == 0)) {
-        const tiny_config& cfg = std::strcmp(argv[1], "tiny") == 0 ? quantized : plain;
+    const tiny_config* tiny = nullptr;
+    if (argc == 4) {
+        const std::string mode = argv[1];
+        tiny = mode == "tiny"             ? &quantized
+               : mode == "tiny-f32"       ? &plain
+               : mode == "qwen2-tiny"     ? &qwen2_quantized
+               : mode == "qwen2-tiny-f32" ? &qwen2_plain
+                                          : nullptr;
+    }
+    if (tiny != nullptr) {
+        const tiny_config& cfg = *tiny;
         write_tiny_model(cfg, argv[2]);
         std::uniform_int_distribution<llama_token> pick(0, static_cast<llama_token>(cfg.n_vocab) - 1);
         std::vector<llama_token> tokens(n_tokens);
@@ -336,7 +380,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     std::fprintf(stderr,
-                 "usage: %s tiny|tiny-f32 <model.gguf> <golden.gguf>\n"
+                 "usage: %s tiny|tiny-f32|qwen2-tiny|qwen2-tiny-f32 <model.gguf> <golden.gguf>\n"
                  "       %s logits <model.gguf> <golden.gguf> <token>...\n"
                  "       %s tokenize <vocab.gguf> <cases.txt> <golden.gguf>\n",
                  argv[0],

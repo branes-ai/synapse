@@ -38,23 +38,26 @@ struct tensor {
     float fill = 0.05f;
 };
 
-// A one-layer Llama model: keys and tensors by name, so a test can drop or
-// replace any of them before building the image.
+// A one-layer Llama-family model (general.architecture `arch`, its keys
+// under "<arch>."): keys and tensors by name, so a test can drop or replace
+// any of them before building the image.
 struct model_spec {
     std::map<std::string, kv_fn> keys;
     std::map<std::string, tensor> tensors;
 
-    model_spec() {
-        keys["general.architecture"] = kv_string("general.architecture", "llama");
-        keys["llama.block_count"] = kv("llama.block_count", value_type::uint32, std::uint32_t{1});
-        keys["llama.context_length"] = kv("llama.context_length", value_type::uint32, std::uint32_t{64});
-        keys["llama.embedding_length"] = kv("llama.embedding_length", value_type::uint32, n_embd);
-        keys["llama.feed_forward_length"] = kv("llama.feed_forward_length", value_type::uint32, n_ff);
-        keys["llama.attention.head_count"] = kv("llama.attention.head_count", value_type::uint32, n_head);
-        keys["llama.attention.head_count_kv"] = kv("llama.attention.head_count_kv", value_type::uint32, n_head_kv);
-        keys["llama.attention.layer_norm_rms_epsilon"] =
-            kv("llama.attention.layer_norm_rms_epsilon", value_type::float32, 1e-5f);
-        keys["llama.rope.freq_base"] = kv("llama.rope.freq_base", value_type::float32, 10000.0f);
+    explicit model_spec(const std::string& arch = "llama") {
+        const auto set = [&](const std::string& suffix, kv_fn f) { keys[arch + "." + suffix] = std::move(f); };
+        const auto key = [&](const char* suffix) { return arch + "." + suffix; };
+        keys["general.architecture"] = kv_string("general.architecture", arch);
+        set("block_count", kv(key("block_count"), value_type::uint32, std::uint32_t{1}));
+        set("context_length", kv(key("context_length"), value_type::uint32, std::uint32_t{64}));
+        set("embedding_length", kv(key("embedding_length"), value_type::uint32, n_embd));
+        set("feed_forward_length", kv(key("feed_forward_length"), value_type::uint32, n_ff));
+        set("attention.head_count", kv(key("attention.head_count"), value_type::uint32, n_head));
+        set("attention.head_count_kv", kv(key("attention.head_count_kv"), value_type::uint32, n_head_kv));
+        set("attention.layer_norm_rms_epsilon",
+            kv(key("attention.layer_norm_rms_epsilon"), value_type::float32, 1e-5f));
+        set("rope.freq_base", kv(key("rope.freq_base"), value_type::float32, 10000.0f));
 
         tensors["token_embd.weight"] = {{n_embd, n_vocab}};
         tensors["output_norm.weight"] = {{n_embd}, f32_tag, 1.0f};
@@ -381,4 +384,105 @@ TEST_CASE("llama_loader: a block count beyond the file's tensors fails fast", "[
     model_spec spec;  // claims 4 billion layers; blk.1 is the first one missing
     spec.keys["llama.block_count"] = kv("llama.block_count", value_type::uint32, std::uint32_t{4'000'000'000});
     require_error(spec, model_errc::missing_tensor, "blk.1.attn_norm.weight");
+}
+
+namespace {
+
+template <typename Op>
+std::size_t count_ops(const graph::compute_graph& g) {
+    return static_cast<std::size_t>(
+        std::count_if(g.nodes().begin(), g.nodes().end(), [](const auto& n) { return std::holds_alternative<Op>(n); }));
+}
+
+}  // namespace
+
+TEST_CASE("llama_loader: loads qwen2 with neox rope and optional Q/K/V and output biases", "[llama][loader][qwen2]") {
+    for (bool biases : {false, true}) {
+        model_spec spec("qwen2");
+        if (biases) {
+            spec.tensors["blk.0.attn_q.bias"] = {{n_head * head_dim}};
+            spec.tensors["blk.0.attn_k.bias"] = {{n_head_kv * head_dim}};
+            spec.tensors["blk.0.attn_v.bias"] = {{n_head_kv * head_dim}};
+            spec.tensors["output.bias"] = {{n_vocab}};
+        }
+        loaded keep;
+        const auto m = load(spec, keep);
+        REQUIRE(m);
+        INFO("biases " << biases);
+        CHECK(m->config.arch == models::architecture::qwen2);
+        CHECK(m->config.rope == kernels::rope_mode::neox);
+        CHECK(count_ops<graph::op_add_bias>(m->graph) == (biases ? 4u : 0u));
+        for (const auto& n : m->graph.nodes()) {
+            if (const auto* r = std::get_if<graph::op_rope>(&n)) {
+                CHECK(r->mode == kernels::rope_mode::neox);
+            }
+        }
+        // The output bias is the last op: the logits are W x + b.
+        if (biases) {
+            const auto& last = std::get<graph::op_add_bias>(m->graph.nodes().back());
+            CHECK(last.out == m->logits);
+        }
+        graph::session s{m->graph};
+        CHECK(s.run({1, 0}));
+        for (float v : s.tensor(m->logits)) {
+            CHECK(std::isfinite(v));
+        }
+    }
+    {
+        model_spec spec;  // Llama keeps normal RoPE and no biases
+        loaded keep;
+        const auto m = load(spec, keep);
+        REQUIRE(m);
+        CHECK(m->config.arch == models::architecture::llama);
+        CHECK(m->config.rope == kernels::rope_mode::normal);
+        CHECK(count_ops<graph::op_add_bias>(m->graph) == 0);
+    }
+}
+
+TEST_CASE("llama_loader: qwen2 reads its own keys and rejects what llama.cpp does not load", "[llama][loader][qwen2]") {
+    {
+        model_spec spec("qwen2");  // keys under the architecture's own prefix only
+        spec.keys.erase("qwen2.block_count");
+        spec.keys["llama.block_count"] = kv("llama.block_count", value_type::uint32, std::uint32_t{1});
+        require_error(spec, model_errc::missing_key, "qwen2.block_count");
+    }
+    {
+        model_spec spec("qwen2");
+        spec.tensors["blk.0.attn_output.bias"] = {{n_embd}};
+        require_error(spec, model_errc::unsupported, "blk.0.attn_output.bias");
+    }
+    {
+        model_spec spec("qwen2");
+        spec.tensors["blk.0.ffn_up.bias"] = {{n_ff}};
+        require_error(spec, model_errc::unsupported, "blk.0.ffn_up.bias");
+    }
+    {
+        model_spec spec("qwen2");  // frequency factors are Llama's
+        spec.tensors["rope_freqs.weight"] = {{head_dim / 2}, f32_tag, 1.0f};
+        require_error(spec, model_errc::unsupported, "rope_freqs.weight");
+    }
+    {
+        model_spec spec("qwen2");
+        spec.tensors["blk.0.attn_k.bias"] = {{n_head * head_dim}};  // as wide as Q, not K
+        require_error(spec, model_errc::bad_tensor, "blk.0.attn_k.bias");
+    }
+    {
+        model_spec spec("qwen2");
+        spec.tensors["output.bias"] = {{n_vocab + 1}};
+        require_error(spec, model_errc::bad_tensor, "output.bias");
+    }
+    {
+        model_spec spec("qwen2");
+        spec.tensors["blk.0.attn_q.bias"] = {{n_head * head_dim}, q5_0_tag};  // whole Q5_0 blocks
+        require_error(spec, model_errc::unsupported_type, "blk.0.attn_q.bias");
+    }
+    {
+        model_spec spec;  // Llama has no output bias
+        spec.tensors["output.bias"] = {{n_vocab}};
+        require_error(spec, model_errc::unsupported, "output.bias");
+    }
+    {
+        model_spec spec("gemma");
+        require_error(spec, model_errc::wrong_architecture, "general.architecture");
+    }
 }

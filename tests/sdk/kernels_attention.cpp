@@ -74,6 +74,45 @@ TEST_CASE("kernels_attention: rope rotates each pair by pos * base^(-2i/d) / fac
     }
 }
 
+TEST_CASE("kernels_attention: neox rope rotates (x[i], x[i + d/2]) by pos * base^(-2i/d)", "[kernels][rope]") {
+    constexpr std::size_t head_dim = 64, n_heads = 2, half = head_dim / 2;
+    constexpr float base = 1000000.0f;  // Qwen2's
+    std::mt19937 rng(6);
+    const auto x = normal_vector(n_heads * head_dim, rng);
+    const float theta_scale = kernels::rope_theta_scale(base, head_dim);
+    for (std::uint32_t pos : {0u, 1u, 9u, 300u}) {
+        std::vector<float> out(x.size());
+        kernels::rope(x, out, head_dim, pos, theta_scale, {}, kernels::rope_mode::neox);
+        for (std::size_t h = 0; h < n_heads; ++h) {
+            for (std::size_t i = 0; i < half; ++i) {
+                const double theta =
+                    pos * std::pow(static_cast<double>(base), -2.0 * static_cast<double>(i) / head_dim);
+                const double x0 = x[h * head_dim + i], x1 = x[h * head_dim + i + half];
+                const double tol = 1e-5 * (1.0 + pos);
+                INFO("pos " << pos << " head " << h << " pair " << i);
+                CHECK(std::fabs(out[h * head_dim + i] - (x0 * std::cos(theta) - x1 * std::sin(theta))) < tol);
+                CHECK(std::fabs(out[h * head_dim + i + half] - (x0 * std::sin(theta) + x1 * std::cos(theta))) < tol);
+            }
+        }
+        if (pos == 0) {
+            CHECK(out == x);
+        }
+    }
+    // The same rotations as normal mode, applied to the de-interleaved head.
+    std::vector<float> interleaved(head_dim), normal(head_dim), neox(head_dim);
+    for (std::size_t i = 0; i < half; ++i) {
+        interleaved[2 * i] = x[i];
+        interleaved[2 * i + 1] = x[i + half];
+    }
+    kernels::rope(
+        std::span<const float>(x).first(head_dim), neox, head_dim, 17, theta_scale, {}, kernels::rope_mode::neox);
+    kernels::rope(interleaved, normal, head_dim, 17, theta_scale, {});
+    for (std::size_t i = 0; i < half; ++i) {
+        CHECK(neox[i] == normal[2 * i]);
+        CHECK(neox[i + half] == normal[2 * i + 1]);
+    }
+}
+
 TEST_CASE("kernels_attention: grouped-query attention over a growing F16 cache", "[kernels][attention]") {
     constexpr std::size_t n_heads = 4, n_kv = 2, hd = 16, max_ctx = 12;
     constexpr std::size_t row = n_kv * hd;
