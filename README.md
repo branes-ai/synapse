@@ -138,7 +138,7 @@ auto logits = model.forward(input_tokens);
 ## Roadmap
 
 1. **GGUF parser.** Header, metadata key/value pairs, and the tensor-info table; zero-copy memory mapping. *(Done: `branes/synapse/gguf/`. Validated against llama.cpp's `gguf-py` reader and writer.)*
-2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `tensor/quantized_view.hpp`, `gguf/tensor_view.hpp`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
+2. **Quantized tensor views.** Block-quantized traits for the standard formats (`Q4_0`, `Q8_0`, `Q4_K`, `Q6_K`, `F16`, `BF16`) and views over raw GGUF buffers. *(Done: `branes/synapse/quant/`, `gguf/tensor_view.hpp`, over MTL5's `block_matrix_view`. Dequantizers bit-exact against llama.cpp's `gguf-py`.)*
 3. **Fused quantized kernels.** Quantized matrix-vector and matrix-matrix products in MTL5 that unpack block scales in-register and accumulate in a wider type with SIMD dot products. *(Started: `kernels/gemv.hpp` and `kernels/gemm.hpp`, ggml-style integer dots for Q4_0/Q8_0/Q4_K/Q6_K, validated against ggml's own kernels; each gemm row is bit-identical to gemv. Matmul and attention run multithreaded on MTL5's thread pool, bit-identical for any thread count. Block dots use MTL5's block-scaled integer dot (one horizontal reduce per chunk, not per block) with rows x tokens tiling; see [docs/assessments/block-scaled-dot-performance.md](docs/assessments/block-scaled-dot-performance.md).)*
 4. **Graph builder and memory planner.** A lightweight DAG, liveness analysis, and a single arena with no allocation during execution. *(Done: `graph/`, for decode and for batched prefill of up to `max_batch` tokens per run.)*
 5. **Reference application.** Load a small GGUF model (e.g. Llama-3.2-1B or a vision-policy model) and verify logits against `llama.cpp`. *(Done for Llama decode: `models/llama.hpp`, RoPE and grouped-query attention over an F16 KV cache in `kernels/attention.hpp`, and `tools/llama_decode`. Logits are checked against llama.cpp on llama.cpp-generated fixtures and, opt-in, on Llama-3.2-1B Q4_K_M. Prompts prefill in batches, bit-identical to token-by-token decoding. Text prompts are tokenized by `tokenizer/`, which matches llama.cpp's tokenizers exactly: byte-level BPE for Llama-3 vocabularies and SentencePiece for Llama-2-family ones (TinyLlama runs end to end too). Qwen2 loads through the same graph, with its Q/K/V biases and NEOX RoPE, and is checked against llama.cpp on Qwen2 fixtures and, opt-in, on Qwen2.5-1.5B-Instruct Q4_K_M. So does Mistral: Mistral 7B and Mistral Nemo as `llama` files (Nemo with the Tekken BPE pre-tokenizer), and Ministral 3 as `mistral3`, with YaRN RoPE scaling, its attention temperature and optional biases; opt-in checks on all three.)*
@@ -238,10 +238,10 @@ Weights are then viewed in their storage format without copying. `visit_matrix` 
 #include <branes/synapse/gguf/tensor_view.hpp>
 
 const auto* wq = model->find_tensor("blk.0.attn_q.weight");
-visit_matrix(*model, *wq, [](const auto& view) {   // quantized_matrix_view<scheme<q4_k>>, ...
-    std::vector<float> row(view.cols());
-    view.dequantize_row(0, row);                    // reference decode of one row
-    mtl::mat::dense2D<float> w = view.to_dense();   // or the whole matrix, as MTL5
+visit_matrix(*model, *wq, [](const auto& view) {   // mtl::mat::block_matrix_view<scheme<q4_k>>, ...
+    std::vector<float> row(view.num_cols());
+    view.decode_row(0, row.data());                 // reference decode of one row
+    mtl::mat::dense2D<float> w = mtl::convert<float>(view);  // or the whole matrix, as MTL5
 });
 ```
 
@@ -255,7 +255,7 @@ std::size_t scratch_bytes = 0;
 for (const auto& t : model->tensors()) {
     visit_matrix(*model, t, [&](const auto& w) {
         using S = typename std::decay_t<decltype(w)>::scheme_type;
-        scratch_bytes = std::max(scratch_bytes, kernels::gemv_scratch_bytes<S>(w.cols()));
+        scratch_bytes = std::max(scratch_bytes, kernels::gemv_scratch_bytes<S>(w.num_cols()));
     });
 }
 std::vector<std::byte> scratch(scratch_bytes);
@@ -265,6 +265,8 @@ visit_matrix(*model, *wq, [&](const auto& w) {
     kernels::gemv(w, x, y, scratch);
 });
 ```
+
+The views are MTL5 matrices, and synapse's schemes plug their fused kernel into MTL5's mat-vec (`mtl::block_kernels`), so `mtl::mult(w, x, y, scratch)` with MTL5 vectors runs the same `kernels::gemv`.
 
 `bench/gemv_bench` compares the fused kernels with dequantize-then-dot.
 

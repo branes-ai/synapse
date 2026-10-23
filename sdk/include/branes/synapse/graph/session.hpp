@@ -244,16 +244,14 @@ private:
         const std::span<std::byte> scratch = bytes(o.scratch);
         const std::size_t n = rows(o.in);
         const std::span<float> y = active(o.out);
-        std::visit(
-            [&](const auto& w) {
-                using S = typename std::decay_t<decltype(w)>::scheme_type;
-                // Quantize the activations once, then split the weight rows.
-                const auto* acts = kernels::gemm_prepare<S>(w.cols(), active(o.in), n, scratch);
-                parallel(w.rows(), matmul_grain, [&](std::size_t r0, std::size_t r1) {
-                    kernels::gemm_rows(w, acts, n, y, r0, r1);
-                });
-            },
-            o.w);
+        visit_view(o.w, [&](const auto& w) {
+            using S = typename std::decay_t<decltype(w)>::scheme_type;
+            // Quantize the activations once, then split the weight rows.
+            const auto* acts = kernels::gemm_prepare<S>(w.num_cols(), active(o.in), n, scratch);
+            parallel(w.num_rows(), matmul_grain, [&](std::size_t r0, std::size_t r1) {
+                kernels::gemm_rows(w, acts, n, y, r0, r1);
+            });
+        });
     }
     void execute(const op_add& o) noexcept {
         kernels::add(active(o.a), active(o.b), active(o.out));
@@ -262,7 +260,7 @@ private:
         for (std::size_t i = 0; i < rows(o.in); ++i) {
             const std::span<const float> in = row(o.in, i);
             const std::span<float> out = row(o.out, i);
-            std::visit([&](const auto& b) { kernels::add_bias(in, b, out); }, o.bias);
+            visit_view(o.bias, [&](const auto& b) { kernels::add_bias(in, b, out); });
         }
     }
     void execute(const op_mul& o) noexcept {
@@ -280,13 +278,13 @@ private:
         for (std::size_t i = 0; i < rows(o.in); ++i) {
             const std::span<const float> in = row(o.in, i);
             const std::span<float> out = row(o.out, i);
-            std::visit([&](const auto& g) { kernels::rms_norm(in, g, o.eps, out); }, o.gamma);
+            visit_view(o.gamma, [&](const auto& g) { kernels::rms_norm(in, g, o.eps, out); });
         }
     }
     void execute(const op_embed& o) noexcept {
         for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
             const std::span<float> out = row(o.out, i);
-            std::visit([&](const auto& t) { t.dequantize_row(batch_.tokens[i], out); }, o.table);
+            visit_view(o.table, [&](const auto& t) { t.decode_row(batch_.tokens[i], out.data()); });
         }
     }
     void execute(const op_rope& o) noexcept {

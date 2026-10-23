@@ -73,13 +73,13 @@ TEST_CASE("quant_golden: every format decodes bit-exactly to the gguf-py referen
     REQUIRE(expected != nullptr);
 
     const bool visited = gguf::visit_matrix(file, *q, [&](const auto& view) {
-        REQUIRE(view.rows() * view.cols() == expected->n_elements());
+        REQUIRE(view.num_rows() * view.num_cols() == expected->n_elements());
         const auto expected_view = gguf::view_as<quant::scheme<gguf::tensor_type::f32>>(file, *expected);
         REQUIRE(expected_view);
-        REQUIRE(expected_view->rows() == view.rows());
-        std::vector<float> row(view.cols());
-        for (std::size_t r = 0; r < view.rows(); ++r) {
-            view.dequantize_row(r, row);
+        REQUIRE(expected_view->num_rows() == view.num_rows());
+        std::vector<float> row(view.num_cols());
+        for (std::size_t r = 0; r < view.num_rows(); ++r) {
+            view.decode_row(r, row.data());
             CHECK(bit_mismatches(row, expected_row(*expected, r)) == 0);
         }
     });
@@ -92,24 +92,24 @@ TEST_CASE("quant_golden: ne[1..3] collapse into rows", "[quant][golden]") {
     CHECK(t->n_dims == 3);
     const auto view = gguf::view_as<quant::scheme<gguf::tensor_type::q8_0>>(fixture(), *t);
     REQUIRE(view);
-    CHECK(view->rows() == 4);
-    CHECK(view->cols() == 64);
+    CHECK(view->num_rows() == 4);
+    CHECK(view->num_cols() == 64);
 }
 
-TEST_CASE("quant_golden: to_dense agrees with dequantize_row", "[quant][golden]") {
+TEST_CASE("quant_golden: mtl::convert agrees with decode_row", "[quant][golden]") {
     const auto* t = fixture().find_tensor("q4_k.q");
     REQUIRE(t != nullptr);
     const auto view = gguf::view_as<quant::scheme<gguf::tensor_type::q4_k>>(fixture(), *t);
     REQUIRE(view);
-    const auto dense = view->to_dense();
-    REQUIRE(dense.num_rows() == view->rows());
-    REQUIRE(dense.num_cols() == view->cols());
-    std::vector<float> row(view->cols());
-    for (std::size_t r = 0; r < view->rows(); ++r) {
-        view->dequantize_row(r, row);
-        for (std::size_t c = 0; c < view->cols(); c += 37) {
+    const auto dense = mtl::convert<float>(*view);
+    REQUIRE(dense.num_rows() == view->num_rows());
+    REQUIRE(dense.num_cols() == view->num_cols());
+    std::vector<float> row(view->num_cols());
+    for (std::size_t r = 0; r < view->num_rows(); ++r) {
+        view->decode_row(r, row.data());
+        for (std::size_t c = 0; c < view->num_cols(); c += 37) {
             CHECK(dense(r, c) == row[c]);
-            CHECK(view->at(r, c) == row[c]);
+            CHECK((*view)(r, c) == row[c]);
         }
     }
 }

@@ -3,7 +3,7 @@
 /// @brief Y = X W^T for a batch of activation rows and a quantized weight matrix.
 ///
 /// The batched form of gemv, for prefill: X holds n activation rows (tokens)
-/// of w.cols() floats, Y receives n rows of w.rows() outputs. Each activation
+/// of w.num_cols() floats, Y receives n rows of w.num_rows() outputs. Each activation
 /// row is quantized once, as gemv does; then every weight block is unpacked
 /// once and dotted with all n rows, so the cost of reading and decoding the
 /// weights is shared by the batch.
@@ -28,7 +28,8 @@
 #include <branes/synapse/kernels/dot.hpp>
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <algorithm>
 #include <array>
@@ -96,20 +97,20 @@ gemm_prepare(std::size_t cols, std::span<const float> x, std::size_t n, std::spa
     return acts;
 }
 
-/// Output rows [r0, r1) of every token: y[t * w.rows() + r] for r in [r0, r1).
+/// Output rows [r0, r1) of every token: y[t * w.num_rows() + r] for r in [r0, r1).
 /// Reads only w and acts and writes only those outputs, so disjoint row
 /// ranges can run on different threads, and the results do not depend on how
 /// the rows are split (D1).
-///   Pre: acts from gemm_prepare for these n rows; r0 <= r1 <= w.rows().
+///   Pre: acts from gemm_prepare for these n rows; r0 <= r1 <= w.num_rows().
 template <quant::Scheme S>
-void gemm_rows(const quantized_matrix_view<S>& w,
+void gemm_rows(const mtl::mat::block_matrix_view<S>& w,
                const activations<typename S::vec_dot_block>* acts,
                std::size_t n,
                std::span<float> y,
                std::size_t r0,
                std::size_t r1) noexcept {
-    const std::size_t cols = w.cols();
-    const std::size_t rows = w.rows();
+    const std::size_t cols = w.num_cols();
+    const std::size_t rows = w.num_rows();
     assert(r0 <= r1 && r1 <= rows && y.size() == n * rows);  // Pre
     if constexpr (S::block_size == 1) {
         // Plain formats: each chunk of a row decoded to float once, dotted
@@ -117,7 +118,7 @@ void gemm_rows(const quantized_matrix_view<S>& w,
         // reload is exact), starting at 0, in chunk order, as gemv (G1).
         std::array<float, plain_chunk> buf{};
         for (std::size_t r = r0; r < r1; ++r) {
-            const std::byte* row = w.row_bytes(r).data();
+            const std::byte* row = w.row(r).data();
             for (std::size_t t = 0; t < n; ++t) {
                 y[t * rows + r] = 0.0f;
             }
@@ -151,7 +152,7 @@ void gemm_rows(const quantized_matrix_view<S>& w,
             for (std::size_t b0 = 0; b0 < blocks; b0 += C::max_blocks) {
                 const std::size_t nb = std::min(C::max_blocks, blocks - b0);
                 for (std::size_t j = 0; j < nr; ++j) {
-                    chunks[j].load(w.row_bytes(g + j).data(), b0, nb);
+                    chunks[j].load(w.row(g + j).data(), b0, nb);
                 }
                 for (std::size_t t = 0; t < n; ++t) {
                     float* yt = y.data() + t * rows + g;
@@ -164,20 +165,20 @@ void gemm_rows(const quantized_matrix_view<S>& w,
     }
 }
 
-/// Y = X W^T: y[t * w.rows() + r] = row r of w . row t of x.
+/// Y = X W^T: y[t * w.num_rows() + r] = row r of w . row t of x.
 ///
-///   Pre:  n >= 1, x.size() == n * w.cols(), y.size() == n * w.rows(),
-///         scratch.size() >= gemm_scratch_bytes<S>(w.cols(), n), scratch
+///   Pre:  n >= 1, x.size() == n * w.num_cols(), y.size() == n * w.num_rows(),
+///         scratch.size() >= gemm_scratch_bytes<S>(w.num_cols(), n), scratch
 ///         aligned to gemm_scratch_alignment; x, y and scratch do not overlap.
 ///   Post: G1 — row t of y equals gemv(w, row t of x) bit for bit.
 template <quant::Scheme S>
-void gemm(const quantized_matrix_view<S>& w,
+void gemm(const mtl::mat::block_matrix_view<S>& w,
           std::span<const float> x,
           std::size_t n,
           std::span<float> y,
           std::span<std::byte> scratch) noexcept {
-    assert(y.size() == n * w.rows());  // Pre
-    gemm_rows(w, gemm_prepare<S>(w.cols(), x, n, scratch), n, y, 0, w.rows());
+    assert(y.size() == n * w.num_rows());  // Pre
+    gemm_rows(w, gemm_prepare<S>(w.num_cols(), x, n, scratch), n, y, 0, w.num_rows());
 }
 
 }  // namespace branes::synapse::kernels
