@@ -85,7 +85,7 @@ void check_format(const std::string& fmt) {
     REQUIRE(at != nullptr);
     const auto w = gguf::view_as<S>(file, *wt);
     REQUIRE(w);
-    REQUIRE(w->cols() == x.size());
+    REQUIRE(w->num_cols() == x.size());
 
     // Activations: bit-identical to ggml's reference quantizer.
     std::vector<A> act(at->nbytes / sizeof(A));
@@ -98,11 +98,11 @@ void check_format(const std::string& fmt) {
     CHECK(std::memcmp(act.data(), file.tensor_data(*at).data(), at->nbytes) == 0);
 
     // y: ggml's vec_dot up to float re-association.
-    std::vector<float> y(w->rows());
-    std::vector<std::byte> scratch(kernels::gemv_scratch_bytes<S>(w->cols()) + kernels::gemv_scratch_alignment);
+    std::vector<float> y(w->num_rows());
+    std::vector<std::byte> scratch(kernels::gemv_scratch_bytes<S>(w->num_cols()) + kernels::gemv_scratch_alignment);
     void* p = scratch.data();
     std::size_t space = scratch.size();
-    REQUIRE(std::align(kernels::gemv_scratch_alignment, kernels::gemv_scratch_bytes<S>(w->cols()), p, space));
+    REQUIRE(std::align(kernels::gemv_scratch_alignment, kernels::gemv_scratch_bytes<S>(w->num_cols()), p, space));
     kernels::gemv(*w, x, y, std::span<std::byte>(static_cast<std::byte*>(p), space));
     for (std::size_t r = 0; r < y.size(); ++r) {
         INFO("row " << r << ": synapse " << y[r] << ", ggml " << y_ggml[r]);
@@ -111,9 +111,9 @@ void check_format(const std::string& fmt) {
 
     // Accuracy against the float reference, within the activation-rounding bound.
     const auto xq = dequantize_activations(act);
-    std::vector<float> row(w->cols());
-    for (std::size_t r = 0; r < w->rows(); ++r) {
-        w->dequantize_row(r, row);
+    std::vector<float> row(w->num_cols());
+    for (std::size_t r = 0; r < w->num_rows(); ++r) {
+        w->decode_row(r, row.data());
         double ref = 0.0;
         double bound = 0.0;
         double magnitude = 0.0;

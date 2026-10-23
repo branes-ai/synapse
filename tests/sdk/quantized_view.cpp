@@ -1,18 +1,20 @@
-// Unit tests for the block layouts, dequantizers, and quantized_matrix_view,
+// Unit tests for the block layouts, dequantizers, and MTL5's block_matrix_view
+// over synapse's schemes,
 // on hand-built blocks whose decoded values follow directly from the format
 // definitions in quant/blocks.hpp.
 
 #include <branes/synapse/quant/blocks.hpp>
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
 
 #include <catch2/catch_test_macros.hpp>
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 using namespace branes::synapse;
@@ -124,39 +126,47 @@ TEST_CASE("quantized_view: geometry and row addressing", "[quant]") {
         blocks.push_back(ramp_q4_0(s));
     }
     const auto data = bytes_of(blocks);
-    const quantized_matrix_view<quant::scheme<tensor_type::q4_0>> view(data, 2, 64);
+    const mtl::mat::block_matrix_view<quant::scheme<tensor_type::q4_0>> view(2, 64, data);
 
-    CHECK(view.rows() == 2);
-    CHECK(view.cols() == 64);
+    CHECK(view.num_rows() == 2);
+    CHECK(view.num_cols() == 64);
     CHECK(view.blocks_per_row() == 2);
-    CHECK(view.row_stride() == 36);
-    CHECK(view.row_bytes(1).data() == data.data() + 36);
-    CHECK(view.block(1, 1).d == 0x4000);
+    CHECK(view.row(1).size() == 36);
+    CHECK(view.row(1).data() == data.data() + 36);
+    CHECK(quant::detail::load_block<quant::block_q4_0>(view.block(1, 1).data()).d == 0x4000);
 
     std::vector<float> row(64);
-    view.dequantize_row(1, row);
+    view.decode_row(1, row.data());
     CHECK(row[0] == 1.5f * -8.0f);  // row 1, block 0
     CHECK(row[63] == 2.0f * 7.0f);  // row 1, block 1, last weight
-    CHECK(view.at(1, 63) == row[63]);
-    CHECK(view.at(0, 32) == 1.0f * -8.0f);
+    CHECK(view(1, 63) == row[63]);
+    CHECK(view(0, 32) == 1.0f * -8.0f);
 
-    const auto dense = view.to_dense();
+    const auto dense = mtl::convert<float>(view);
     CHECK(dense(1, 0) == row[0]);
-    CHECK(dense(0, 33) == view.at(0, 33));
+    CHECK(dense(0, 33) == view(0, 33));
 }
 
 TEST_CASE("quantized_view: plain formats are one-element blocks", "[quant]") {
     const std::vector<std::uint16_t> halves = {fp16_one, fp16_half, 0xc000, 0x0000};
     const auto data = bytes_of(halves);
-    const quantized_matrix_view<quant::scheme<tensor_type::f16>> view(data, 2, 2);
+    const mtl::mat::block_matrix_view<quant::scheme<tensor_type::f16>> view(2, 2, data);
     CHECK(view.blocks_per_row() == 2);
-    CHECK(view.at(0, 1) == 0.5f);
-    CHECK(view.at(1, 0) == -2.0f);
-    CHECK(view.block(0, 0) == fp16_one);
+    CHECK(view(0, 1) == 0.5f);
+    CHECK(view(1, 0) == -2.0f);
+    CHECK(quant::detail::load_block<std::uint16_t>(view.block(0, 0).data()) == fp16_one);
 
-    const quantized_matrix_view<quant::scheme<tensor_type::f32>> empty;
-    CHECK(empty.rows() == 0);
-    CHECK(empty.data().empty());
+    const mtl::mat::block_matrix_view<quant::scheme<tensor_type::f32>> empty(0, 0, {});
+    CHECK(empty.num_rows() == 0);
+    CHECK(empty.size() == 0);
+}
+
+TEST_CASE("quantized_view: block_matrix_view rejects a shape its bytes do not hold", "[quant]") {
+    using view_t = mtl::mat::block_matrix_view<quant::scheme<tensor_type::q4_0>>;
+    const std::vector<std::byte> data(2 * sizeof(quant::block_q4_0));
+    CHECK_NOTHROW(view_t(1, 64, data));
+    CHECK_THROWS_AS(view_t(1, 48, data), std::invalid_argument);  // not whole blocks
+    CHECK_THROWS_AS(view_t(2, 64, data), std::invalid_argument);  // too few bytes
 }
 
 TEST_CASE("quantized_view: scheme registry", "[quant]") {
@@ -165,4 +175,7 @@ TEST_CASE("quantized_view: scheme registry", "[quant]") {
     STATIC_REQUIRE_FALSE(quant::has_scheme<tensor_type::q5_k>);
     STATIC_REQUIRE_FALSE(quant::has_scheme<tensor_type::i32>);
     STATIC_REQUIRE(quant::Scheme<quant::scheme<tensor_type::q6_k>>);
+    STATIC_REQUIRE(mtl::BlockScheme<quant::scheme<tensor_type::q4_0>>);
+    STATIC_REQUIRE(mtl::BlockScheme<quant::scheme<tensor_type::f16>>);
+    STATIC_REQUIRE(quant::scheme<tensor_type::q4_k>::block_bytes == quant::scheme<tensor_type::q4_k>::type_size);
 }

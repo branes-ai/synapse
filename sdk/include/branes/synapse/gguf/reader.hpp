@@ -505,9 +505,13 @@ private:
         if (t.ne[0] % info->block_size != 0) {
             return fail(errc::partial_block, start);  // I4
         }
-        // row_size <= ne[0] * 4.5 bytes for every supported type and
-        // elements <= INT64_MAX, but the product can still overflow uint64.
-        const auto bytes = checked_mul(t.ne[0] / info->block_size * info->type_size, elements / t.ne[0]);
+        // elements <= INT64_MAX, but a row's bytes (up to ne[0] * 4 for F32)
+        // and the total can each still overflow uint64.
+        const auto row_bytes = checked_mul(t.ne[0] / info->block_size, info->type_size);
+        if (!row_bytes) {
+            return fail(errc::bad_dims, start);
+        }
+        const auto bytes = checked_mul(*row_bytes, elements / t.ne[0]);
         if (!bytes) {
             return fail(errc::bad_dims, start);
         }

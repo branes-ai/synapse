@@ -8,7 +8,8 @@
 /// softmax subtracts the maximum before exponentiating.
 
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <algorithm>
 #include <array>
@@ -31,11 +32,11 @@ inline void add(std::span<const float> a, std::span<const float> b, std::span<fl
 /// out = x + bias, with bias a 1 x n weight row in any decodable scheme
 /// (usually F32), as ggml_add adds a bias vector to each row. The bias is
 /// decoded straight into out, so no scratch is needed.
-///   Pre: x.size() == out.size() == bias.cols(), bias.rows() == 1; out does not alias x.
+///   Pre: x.size() == out.size() == bias.num_cols(), bias.num_rows() == 1; out does not alias x.
 template <quant::Scheme S>
-void add_bias(std::span<const float> x, const quantized_matrix_view<S>& bias, std::span<float> out) noexcept {
-    assert(bias.rows() == 1 && x.size() == bias.cols() && x.size() == out.size());  // Pre
-    bias.dequantize_row(0, out);
+void add_bias(std::span<const float> x, const mtl::mat::block_matrix_view<S>& bias, std::span<float> out) noexcept {
+    assert(bias.num_rows() == 1 && x.size() == bias.num_cols() && x.size() == out.size());  // Pre
+    bias.decode_row(0, out.data());
     for (std::size_t i = 0; i < out.size(); ++i) {
         out[i] = x[i] + out[i];
     }
@@ -93,13 +94,13 @@ inline void softmax(std::span<const float> x, std::span<float> out) noexcept {
 /// out = x / rms(x) * gamma, rms(x) = sqrt(mean(x^2) + eps), as llama.cpp
 /// computes RMSNorm followed by the multiply by its weight. gamma is a 1 x n
 /// weight row in any decodable scheme (usually F32), decoded 256 at a time.
-///   Pre: x.size() == out.size() == gamma.cols(), gamma.rows() == 1, x non-empty.
+///   Pre: x.size() == out.size() == gamma.num_cols(), gamma.num_rows() == 1, x non-empty.
 template <quant::Scheme S>
 void rms_norm(std::span<const float> x,
-              const quantized_matrix_view<S>& gamma,
+              const mtl::mat::block_matrix_view<S>& gamma,
               float eps,
               std::span<float> out) noexcept {
-    assert(gamma.rows() == 1 && x.size() == gamma.cols() && x.size() == out.size() && !x.empty());  // Pre
+    assert(gamma.num_rows() == 1 && x.size() == gamma.num_cols() && x.size() == out.size() && !x.empty());  // Pre
     double sum = 0.0;
     for (float v : x) {
         sum += static_cast<double>(v * v);
@@ -107,7 +108,7 @@ void rms_norm(std::span<const float> x,
     const auto mean = static_cast<float>(sum / static_cast<double>(x.size()));
     const float scale = 1.0f / std::sqrt(mean + eps);
 
-    const std::span<const std::byte> g = gamma.row_bytes(0);
+    const std::span<const std::byte> g = gamma.row(0);
     constexpr std::size_t chunk = 256;
     std::array<float, chunk> gbuf{};
     for (std::size_t i = 0; i < x.size(); i += chunk) {

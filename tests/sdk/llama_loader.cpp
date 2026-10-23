@@ -195,7 +195,9 @@ TEST_CASE("llama_loader: optional keys take llama.cpp's defaults", "[llama][load
 TEST_CASE("llama_loader: uses output.weight when present, else the tied embedding", "[llama][loader]") {
     const auto logits_weight = [](const models::llama_model& m) {
         const auto& last = std::get<graph::op_matmul>(m.graph.nodes().back());
-        return std::visit([](const auto& v) { return v.data().data(); }, last.w);
+        const std::byte* data = nullptr;
+        graph::visit_view(last.w, [&](const auto& v) { data = v.row(0).data(); });
+        return data;
     };
     model_spec tied;
     loaded keep_tied;

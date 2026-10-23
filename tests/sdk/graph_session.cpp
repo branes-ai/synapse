@@ -102,8 +102,8 @@ std::vector<float> input_vector() {
 template <typename View>
 std::vector<float> gemv_unaliased(const View& w, const std::vector<float>& x) {
     using S = typename View::scheme_type;
-    std::vector<float> y(w.rows());
-    std::vector<std::byte> scratch(kernels::gemv_scratch_bytes<S>(w.cols()));
+    std::vector<float> y(w.num_rows());
+    std::vector<std::byte> scratch(kernels::gemv_scratch_bytes<S>(w.num_cols()));
     kernels::gemv(w, x, y, scratch);
     return y;
 }
@@ -117,11 +117,11 @@ bool bit_equal(std::span<const float> a, std::span<const float> b) {
 // Double-precision reference on the dequantized weights.
 template <typename View>
 std::vector<double> matvec_ref(const View& w, const std::vector<double>& x) {
-    std::vector<double> y(w.rows(), 0.0);
-    std::vector<float> row(w.cols());
-    for (std::size_t r = 0; r < w.rows(); ++r) {
-        w.dequantize_row(r, row);
-        for (std::size_t c = 0; c < w.cols(); ++c) {
+    std::vector<double> y(w.num_rows(), 0.0);
+    std::vector<float> row(w.num_cols());
+    for (std::size_t r = 0; r < w.num_rows(); ++r) {
+        w.decode_row(r, row.data());
+        for (std::size_t c = 0; c < w.num_cols(); ++c) {
             y[r] += static_cast<double>(row[c]) * x[c];
         }
     }
@@ -136,7 +136,7 @@ std::vector<double> rms_norm_ref(const std::vector<double>& x, const View& gamma
     }
     const double scale = 1.0 / std::sqrt(ss / static_cast<double>(x.size()) + eps);
     std::vector<float> g(x.size());
-    gamma.dequantize_row(0, g);
+    gamma.decode_row(0, g.data());
     std::vector<double> y(x.size());
     for (std::size_t i = 0; i < x.size(); ++i) {
         y[i] = x[i] * scale * g[i];
@@ -284,7 +284,7 @@ TEST_CASE("graph_session: runs check the step against the graph's limits", "[gra
     // The embedding really is row `token`: at position 0 attention returns V.
     REQUIRE(s.run({7, 0}));
     std::vector<float> row(16);
-    table.view().dequantize_row(7, row);
+    table.view().decode_row(7, row.data());
     for (std::size_t i = 0; i < 16; ++i) {
         CHECK(s.tensor(a)[i] == fp16_to_float(float_to_fp16(row[i])));
     }
@@ -355,7 +355,7 @@ TEST_CASE("graph_session: add_bias adds the decoded bias to every row of the run
         const std::vector<std::uint32_t> tokens(2, 0);  // two of the three rows
         REQUIRE(s.run(batch{tokens, 0}));
         std::vector<float> decoded(d);
-        std::visit([&](const auto& v) { v.dequantize_row(0, decoded); }, bias);
+        visit_view(bias, [&](const auto& v) { v.decode_row(0, decoded.data()); });
         const auto out = s.tensor(y);
         for (std::size_t r = 0; r < tokens.size(); ++r) {
             for (std::size_t i = 0; i < d; ++i) {

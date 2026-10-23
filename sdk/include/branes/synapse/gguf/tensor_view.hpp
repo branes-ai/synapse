@@ -1,6 +1,6 @@
 #pragma once
 /// @file tensor_view.hpp
-/// @brief Bind GGUF tensors to typed quantized_matrix_views.
+/// @brief Bind GGUF tensors to typed MTL5 block_matrix_views.
 ///
 /// GGML shapes map onto a row-major matrix: ne[0] (contiguous) is the column
 /// count and ne[1] * ne[2] * ne[3] the row count. A weight W[out, in] is
@@ -13,7 +13,8 @@
 
 #include <branes/synapse/gguf/reader.hpp>
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <cstddef>
 #include <optional>
@@ -26,15 +27,16 @@ namespace branes::synapse::gguf {
 ///
 ///   Pre:  t is an element of file.tensors().
 ///   Post: on success, the view's I1-I2 hold (they follow from the parser's
-///         I4-I5: whole blocks per row, and nbytes = rows * row size).
+///         I4-I5: whole blocks per row, and nbytes = rows * row size), so
+///         block_matrix_view's constructor, which checks them, cannot throw.
 template <quant::Scheme S>
-std::optional<quantized_matrix_view<S>> view_as(const gguf_file& file, const tensor_info& t) noexcept {
+std::optional<mtl::mat::block_matrix_view<S>> view_as(const gguf_file& file, const tensor_info& t) noexcept {
     if (t.type != S::type) {
         return std::nullopt;
     }
     const auto cols = static_cast<std::size_t>(t.ne[0]);
     const auto rows = static_cast<std::size_t>(t.ne[1] * t.ne[2] * t.ne[3]);
-    return quantized_matrix_view<S>(file.tensor_data(t), rows, cols);
+    return mtl::mat::block_matrix_view<S>(rows, cols, file.tensor_data(t));
 }
 
 namespace detail {
@@ -47,7 +49,7 @@ bool visit_as(const gguf_file& file, const tensor_info& t, F&& fn) {
 
 }  // namespace detail
 
-/// Call fn(quantized_matrix_view<S>) with the scheme S of tensor `t`.
+/// Call fn(mtl::mat::block_matrix_view<S>) with the scheme S of tensor `t`.
 /// Returns false, without calling fn, if synapse has no scheme for t.type yet.
 ///
 ///   Pre:  t is an element of file.tensors().

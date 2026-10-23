@@ -4,7 +4,7 @@
 ///
 /// A graph is a DAG of operations over float activation vectors. Weights are
 /// not tensors of the graph: they are bound into the operations as typed
-/// quantized_matrix_views (zero-copy views into the model file), so the
+/// MTL5 block_matrix_views (zero-copy views into the model file), so the
 /// executor never switches on a storage format.
 ///
 /// State that outlives a run (the KV cache) is not a tensor either: a graph
@@ -80,9 +80,11 @@
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/quant/scheme.hpp>
 #include <branes/synapse/result.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
+
+#include <mtl/mat/block_matrix_view.hpp>
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -90,6 +92,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -117,20 +120,59 @@ inline constexpr tensor_id invalid_tensor = std::numeric_limits<tensor_id>::max(
 using state_id = std::uint32_t;
 inline constexpr state_id invalid_state = std::numeric_limits<state_id>::max();
 
-/// A weight matrix in any format synapse can compute with.
-using matrix_ref = std::variant<quantized_matrix_view<quant::scheme<tensor_type::f32>>,
-                                quantized_matrix_view<quant::scheme<tensor_type::f16>>,
-                                quantized_matrix_view<quant::scheme<tensor_type::bf16>>,
-                                quantized_matrix_view<quant::scheme<tensor_type::q4_0>>,
-                                quantized_matrix_view<quant::scheme<tensor_type::q8_0>>,
-                                quantized_matrix_view<quant::scheme<tensor_type::q4_k>>,
-                                quantized_matrix_view<quant::scheme<tensor_type::q6_k>>>;
+/// A weight matrix in any format synapse can compute with, or no matrix
+/// (monostate, the default: 0 x 0, which every builder check rejects).
+using matrix_ref = std::variant<std::monostate,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::f32>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::f16>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::bf16>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::q4_0>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::q8_0>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::q4_k>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::q6_k>>>;
 
+namespace detail {
+template <typename V>
+inline constexpr bool is_empty_matrix = std::is_same_v<std::decay_t<V>, std::monostate>;
+}  // namespace detail
+
+/// Rows and columns of m; 0 for the empty matrix.
 inline std::size_t rows(const matrix_ref& m) noexcept {
-    return std::visit([](const auto& v) { return v.rows(); }, m);
+    return std::visit(
+        [](const auto& v) -> std::size_t {
+            if constexpr (detail::is_empty_matrix<decltype(v)>) {
+                return 0;
+            } else {
+                return v.num_rows();
+            }
+        },
+        m);
 }
 inline std::size_t cols(const matrix_ref& m) noexcept {
-    return std::visit([](const auto& v) { return v.cols(); }, m);
+    return std::visit(
+        [](const auto& v) -> std::size_t {
+            if constexpr (detail::is_empty_matrix<decltype(v)>) {
+                return 0;
+            } else {
+                return v.num_cols();
+            }
+        },
+        m);
+}
+
+/// Call fn(view) with the view m holds.  Pre: m is not empty, which the
+/// builder's checks guarantee for every matrix bound into a graph.
+template <typename F>
+void visit_view(const matrix_ref& m, F&& fn) {
+    std::visit(
+        [&](const auto& v) {
+            if constexpr (detail::is_empty_matrix<decltype(v)>) {
+                assert(false && "visit_view: empty matrix_ref");  // Pre
+            } else {
+                fn(v);
+            }
+        },
+        m);
 }
 
 enum class tensor_role : std::uint8_t { input, intermediate, output, scratch };
@@ -420,16 +462,21 @@ public:
         }
         // gemm scratch for every row of x; n * (per-row bytes) must not wrap.
         const std::size_t n = g_.rows(x);
+        // cols(w) == size_of(x) > 0, so w is not empty.
         const std::optional<std::size_t> scratch_bytes = std::visit(
             [n](const auto& v) -> std::optional<std::size_t> {
-                using S = typename std::decay_t<decltype(v)>::scheme_type;
-                using A = typename S::vec_dot_block;
-                const std::size_t per_row =
-                    kernels::detail::gemm_row_stride<S>(v.cols()) + sizeof(kernels::activations<A>) + sizeof(float);
-                if (n > (max_graph_bytes - kernels::gemm_scratch_alignment) / per_row) {
+                if constexpr (detail::is_empty_matrix<decltype(v)>) {
                     return std::nullopt;
+                } else {
+                    using S = typename std::decay_t<decltype(v)>::scheme_type;
+                    using A = typename S::vec_dot_block;
+                    const std::size_t per_row = kernels::detail::gemm_row_stride<S>(v.num_cols()) +
+                                                sizeof(kernels::activations<A>) + sizeof(float);
+                    if (n > (max_graph_bytes - kernels::gemm_scratch_alignment) / per_row) {
+                        return std::nullopt;
+                    }
+                    return kernels::gemm_scratch_bytes<S>(v.num_cols(), n);
                 }
-                return kernels::gemm_scratch_bytes<S>(v.cols(), n);
             },
             w);
         if (!scratch_bytes) {

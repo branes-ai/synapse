@@ -15,8 +15,8 @@
 #include <branes/synapse/kernels/gemv.hpp>
 #include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/scheme.hpp>
-#include <branes/synapse/tensor/quantized_view.hpp>
 
+#include <mtl/mat/block_matrix_view.hpp>
 #include <mtl/simd/algorithm.hpp>
 
 #include <algorithm>
@@ -79,7 +79,7 @@ template <tensor_type T>
 void bench(const char* name, std::size_t rows, std::size_t cols, int reps, std::mt19937& rng) {
     using S = quant::scheme<T>;
     const auto data = random_matrix<S>(rows, cols, rng);
-    const quantized_matrix_view<S> w(data, rows, cols);
+    const mtl::mat::block_matrix_view<S> w(rows, cols, data);
     std::normal_distribution<float> normal(0.0f, 1.0f);
     std::vector<float> x(cols);
     for (auto& v : x) {
@@ -97,7 +97,7 @@ void bench(const char* name, std::size_t rows, std::size_t cols, int reps, std::
     std::vector<float> row(cols);
     const double base = median_ms(reps, [&] {
         for (std::size_t r = 0; r < rows; ++r) {
-            w.dequantize_row(r, row);
+            w.decode_row(r, row.data());
             y_base[r] = mtl::simd::reduce_dot(row.data(), x.data(), cols);
         }
     });
