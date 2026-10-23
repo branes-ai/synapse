@@ -1,4 +1,5 @@
 #pragma once
+// Ported from llama.cpp (MIT License, The ggml authors); see THIRD_PARTY_NOTICES.md.
 /// @file bpe.hpp
 /// @brief Byte-level BPE tokenization of Llama-3 and Qwen2 vocabularies, as llama.cpp does it.
 ///

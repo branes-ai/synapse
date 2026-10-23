@@ -1,4 +1,6 @@
 #pragma once
+// Ported from ggml (MIT License, The ggml authors), YaRN scaling also from YaRN
+// (MIT License, Jeffrey Quesnelle and Bowen Peng); see THIRD_PARTY_NOTICES.md.
 /// @file attention.hpp
 /// @brief Rotary position embedding and causal self-attention over a KV cache.
 ///
