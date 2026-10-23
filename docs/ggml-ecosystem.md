@@ -1,10 +1,10 @@
 # The GGML ecosystem, and where synapse fits
 
-synapse loads a subset of the models the GGML ecosystem distributes, the Llama-family architectures `llama`, `qwen2` and `mistral3`, and computes what llama.cpp computes for them. It rejects other architectures and unsupported features rather than approximating them. Its tests hold it to llama.cpp's logits and tokens. This page describes that ecosystem, so that the claims in synapse's code and tests make sense: "bit-identical to llama.cpp", "follows ggml's rounding", "llama.cpp's `yarn_attn_factor`".
+synapse loads a subset of the models distributed by the GGML ecosystem: GGUF files whose `general.architecture` is `llama`, `qwen2` or `mistral3`. llama.cpp builds them with separate graph builders, but they differ only in a few places, so synapse builds all three with one graph (`models/llama.hpp`). It computes what llama.cpp computes for them. It rejects other architectures and unsupported features rather than approximating them. Its tests hold it to llama.cpp's logits and tokens. This page describes that ecosystem, so that the claims in synapse's code and tests make sense: "bit-identical to llama.cpp", "follows ggml's rounding", "llama.cpp's `yarn_attn_factor`".
 
 What the model itself computes is in [llama-model.md](llama-model.md).
 
-References to llama.cpp are to the checkout synapse's fixtures were generated from (`e6f2ec01f`).
+References to llama.cpp use the checkout from which synapse's fixtures were generated (`e6f2ec01f`).
 - **llama.cpp paths:** relative to that repository (`src/`, `ggml/`, `tools/`, `gguf-py/`, `convert_hf_to_gguf.py`).
 - **synapse paths:** relative to synapse's repository root when they start with `sdk/`, `scripts/`, `tests/`, `cmake/` or `docs/`.
 - **Short synapse paths** in synapse's own column, like `quant/q8.hpp` or `models/llama.hpp`: relative to `sdk/include/branes/synapse/`. `tools/llama_decode` is the one exception, at synapse's root.
