@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/branes-ai/synapse/compare/v0.9.1...v0.10.0) (2026-10-23)
+
+
+### Features
+
+* **models:** mistral support: mistral3 with YaRN and attention temperature, tekken tokenizer ([#33](https://github.com/branes-ai/synapse/issues/33)) ([3cbf40f](https://github.com/branes-ai/synapse/commit/3cbf40fc29b35decbacf73d53f2899cf9dcae8a6))
+
 ## [0.9.1](https://github.com/branes-ai/synapse/compare/v0.9.0...v0.9.1) (2026-10-23)
 
 
