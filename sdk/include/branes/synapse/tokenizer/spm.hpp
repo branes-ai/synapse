@@ -35,7 +35,8 @@
 ///   T1: every id in ids_, byte_, specials_, bos_, eos_ is < tokens_.size()
 ///   T2: decode(encode(s)) == (add_space_prefix ? " " : "") + s for every
 ///       non-empty valid UTF-8 s with no special-token text and no U+2581
-///       (every byte has a token, checked at load, so nothing is dropped).
+///       (every byte has a fallback token that decodes back to that byte,
+///       checked at load, so nothing is dropped or misread).
 ///       As in llama.cpp it does not extend further: an empty s encodes to
 ///       nothing; an input U+2581 reads back as a space; and in invalid
 ///       UTF-8 a stray lead byte can absorb a following escaped space into a
@@ -49,6 +50,7 @@
 #include <branes/synapse/tokenizer/vocab.hpp>
 
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -152,12 +154,20 @@ public:
         for (std::size_t b = 0; b < 256; ++b) {
             std::array<char, 7> hex{};
             std::snprintf(hex.data(), hex.size(), "<0x%02X>", static_cast<unsigned>(b));
+            const std::string byte(1, static_cast<char>(b));
             if (const auto id = t.id_of(hex.data())) {
                 t.byte_[b] = *id;
-            } else if (const auto raw = t.id_of(std::string(1, static_cast<char>(b)))) {
+            } else if (const auto raw = t.id_of(byte)) {
                 t.byte_[b] = *raw;
             } else {
                 return fail(tokenizer_errc::bad_value, "tokenizer.ggml.tokens");
+            }
+            // The fallback must also decode back to its byte: a <0xXX> token
+            // not typed `byte` (e.g. a vocabulary without token types) would
+            // decode as its literal text, as in llama.cpp. Reject rather than
+            // round-trip wrongly.
+            if (t.decode(t.byte_[b]) != byte) {
+                return fail(tokenizer_errc::bad_value, "tokenizer.ggml.token_type");
             }
         }
         t.specials_ = special_tokens(t.tokens_, t.types_);
@@ -225,8 +235,13 @@ public:
             out = unescape_spaces(text);
             break;
         case token_type::byte:
+            // llama.cpp's token_to_byte: strtol of the two hex digits. Parsed
+            // without exceptions (the vocabulary is untrusted); like strtol,
+            // digits that do not parse give 0.
             if (text.size() == 6 && text.starts_with("<0x") && text.ends_with('>')) {
-                out.push_back(static_cast<char>(std::stoi(std::string(text.substr(3, 2)), nullptr, 16)));
+                unsigned value = 0;
+                std::from_chars(text.data() + 3, text.data() + 5, value, 16);
+                out.push_back(static_cast<char>(value));
             }
             break;
         case token_type::user_defined:

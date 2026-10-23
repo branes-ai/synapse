@@ -153,6 +153,15 @@ TEST_CASE("tokenizer_spm: merges by score, prefixes a space, falls back to bytes
     CHECK(t->decode(1, true) == "<s>");
 }
 
+TEST_CASE("tokenizer_spm: a malformed byte token decodes without throwing, as llama.cpp", "[tokenizer][spm]") {
+    vocab_spec spec;
+    spec.add("<0xZZ>", 0, 6);  // typed byte, but not hex: llama.cpp's strtol gives 0
+    std::vector<std::byte> keep;
+    auto t = load(spec, keep);
+    REQUIRE(t);
+    CHECK(t->decode(spec.id("<0xZZ>")) == std::string(1, '\0'));
+}
+
 TEST_CASE("tokenizer_spm: honours add_space_prefix, add_bos_token and add_eos_token", "[tokenizer][spm]") {
     vocab_spec spec;
     spec.keys["tokenizer.ggml.add_space_prefix"] =
@@ -188,6 +197,13 @@ TEST_CASE("tokenizer_spm: rejects vocabularies it cannot tokenize correctly", "[
         spec.keys["tokenizer.ggml.bos_token_id"] =
             kv("tokenizer.ggml.bos_token_id", value_type::uint32, std::uint32_t{1u << 20});
         require_error(spec, tokenizer_errc::bad_value, "tokenizer.ggml.bos_token_id");
+    }
+    {
+        vocab_spec spec;  // T2: <0xXX> tokens typed `normal` would decode as their text
+        for (std::size_t b = 0; b < 256; ++b) {
+            spec.types[3 + b] = 1;
+        }
+        require_error(spec, tokenizer_errc::bad_value, "tokenizer.ggml.token_type");
     }
     {
         vocab_spec spec;
