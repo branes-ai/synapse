@@ -18,3 +18,5 @@ script named below; none is hand-edited.
 | `tekken_vocab.gguf`, `tekken_golden.gguf` | The synthetic vocabulary with Mistral's Tekken pre-tokenizer (merges trained to cross case boundaries), and llama.cpp's tokenizations | `scripts/gen_tokenizer_fixture.py --pre tekken --cases tekken synthetic` |
 | `spm_vocab.gguf` | llama.cpp's Llama-2 SentencePiece vocabulary, `models/ggml-vocab-llama-spm.gguf`, copied unchanged from llama.cpp (MIT License, Copyright (c) 2023-2026 The ggml authors; checkout `e6f2ec01f`) | copied from llama.cpp |
 | `spm_golden.gguf` | llama.cpp's tokenizations of `spm_vocab.gguf` | `scripts/gen_tokenizer_fixture.py --cases spm golden` |
+
+`spm_vocab.gguf` is the one file copied from another project; its license text is in [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md).

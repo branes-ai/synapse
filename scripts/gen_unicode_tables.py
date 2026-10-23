@@ -71,6 +71,8 @@ def main() -> None:
     letters = ranges([c in ("Lu", "Ll", "Lt", "Lm", "Lo") for c in cat])
     numbers = ranges([c in ("Nd", "Nl", "No") for c in cat])
     header = f"""#pragma once
+// Generated from the Unicode Character Database (Unicode License v3);
+// see THIRD_PARTY_NOTICES.md.
 /// @file unicode_tables.hpp
 /// @brief Unicode {UNICODE_VERSION} letter (\\p{{L}}) and number (\\p{{N}}) code point ranges.
 ///
