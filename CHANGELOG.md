@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.11.0](https://github.com/branes-ai/synapse/compare/v0.10.1...v0.11.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* view weights as MTL5's block_matrix_view, replacing quantized_matrix_view
+
+### Bug Fixes
+
+* reject a GGUF tensor whose row byte count overflows ([6dbb2f4](https://github.com/branes-ai/synapse/commit/6dbb2f458a30d4b57d415128748bdfdbf8f3081e))
+
+
+### Code Refactoring
+
+* view weights as MTL5's block_matrix_view, replacing quantized_matrix_view ([6dbb2f4](https://github.com/branes-ai/synapse/commit/6dbb2f458a30d4b57d415128748bdfdbf8f3081e))
+
 ## [0.10.1](https://github.com/branes-ai/synapse/compare/v0.10.0...v0.10.1) (2026-10-23)
 
 
