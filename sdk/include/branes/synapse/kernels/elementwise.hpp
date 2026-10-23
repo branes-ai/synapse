@@ -27,6 +27,19 @@ inline void add(std::span<const float> a, std::span<const float> b, std::span<fl
     }
 }
 
+/// out = x + bias, with bias a 1 x n weight row in any decodable scheme
+/// (usually F32), as ggml_add adds a bias vector to each row. The bias is
+/// decoded straight into out, so no scratch is needed.
+///   Pre: x.size() == out.size() == bias.cols(), bias.rows() == 1; out does not alias x.
+template <quant::Scheme S>
+void add_bias(std::span<const float> x, const quantized_matrix_view<S>& bias, std::span<float> out) noexcept {
+    assert(bias.rows() == 1 && x.size() == bias.cols() && x.size() == out.size());  // Pre
+    bias.dequantize_row(0, out);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        out[i] = x[i] + out[i];
+    }
+}
+
 /// out = a * b (element-wise).  Pre: equal sizes.
 inline void mul(std::span<const float> a, std::span<const float> b, std::span<float> out) noexcept {
     assert(a.size() == b.size() && a.size() == out.size());  // Pre

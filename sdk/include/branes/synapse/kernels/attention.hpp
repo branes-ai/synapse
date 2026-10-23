@@ -40,7 +40,15 @@ inline float rope_theta_scale(float base, std::size_t head_dim) noexcept {
     return std::pow(base, -2.0f / static_cast<float>(head_dim));
 }
 
-/// Rotate every head of x by its position.  x holds heads of head_dim floats.
+/// Which elements of a head RoPE rotates together (ggml's rope types).
+enum class rope_mode : std::uint8_t {
+    normal,  ///< pair i is (x[2i], x[2i+1]): Llama
+    neox,    ///< pair i is (x[i], x[i + head_dim/2]): GPT-NeoX, Qwen2
+};
+
+/// Rotate every head of x by its position: pair i of each head by
+/// theta_i = pos * theta_scale^i / freq_factors[i]. x holds heads of
+/// head_dim floats; mode selects the pairs.
 ///   Pre: x.size() == out.size(), head_dim even and non-zero, x.size() % head_dim == 0,
 ///        freq_factors empty or of size head_dim / 2; out does not alias x.
 inline void rope(std::span<const float> x,
@@ -48,20 +56,25 @@ inline void rope(std::span<const float> x,
                  std::size_t head_dim,
                  std::uint32_t pos,
                  float theta_scale,
-                 std::span<const float> freq_factors) noexcept {
+                 std::span<const float> freq_factors,
+                 rope_mode mode = rope_mode::normal) noexcept {
     assert(x.size() == out.size() && head_dim != 0 && head_dim % 2 == 0 && x.size() % head_dim == 0);  // Pre
     assert(freq_factors.empty() || freq_factors.size() == head_dim / 2);                               // Pre
+    // Pair i is (x[a], x[a + offset]) with a = stride * i.
+    const std::size_t stride = mode == rope_mode::normal ? 2 : 1;
+    const std::size_t offset = mode == rope_mode::normal ? 1 : head_dim / 2;
     float theta = static_cast<float>(pos);
-    for (std::size_t i0 = 0; i0 < head_dim; i0 += 2) {
-        const float ff = freq_factors.empty() ? 1.0f : freq_factors[i0 / 2];
+    for (std::size_t i = 0; i < head_dim / 2; ++i) {
+        const float ff = freq_factors.empty() ? 1.0f : freq_factors[i];
         const float t = theta / ff;
         const float c = std::cos(t);
         const float s = std::sin(t);
+        const std::size_t a = stride * i;
         for (std::size_t h = 0; h < x.size(); h += head_dim) {
-            const float x0 = x[h + i0];
-            const float x1 = x[h + i0 + 1];
-            out[h + i0] = x0 * c - x1 * s;
-            out[h + i0 + 1] = x0 * s + x1 * c;
+            const float x0 = x[h + a];
+            const float x1 = x[h + a + offset];
+            out[h + a] = x0 * c - x1 * s;
+            out[h + a + offset] = x0 * s + x1 * c;
         }
         theta *= theta_scale;
     }

@@ -258,6 +258,13 @@ private:
     void execute(const op_add& o) noexcept {
         kernels::add(active(o.a), active(o.b), active(o.out));
     }
+    void execute(const op_add_bias& o) noexcept {
+        for (std::size_t i = 0; i < rows(o.in); ++i) {
+            const std::span<const float> in = row(o.in, i);
+            const std::span<float> out = row(o.out, i);
+            std::visit([&](const auto& b) { kernels::add_bias(in, b, out); }, o.bias);
+        }
+    }
     void execute(const op_mul& o) noexcept {
         kernels::mul(active(o.a), active(o.b), active(o.out));
     }
@@ -284,7 +291,7 @@ private:
     }
     void execute(const op_rope& o) noexcept {
         for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
-            kernels::rope(row(o.in, i), row(o.out, i), o.head_dim, position(i), o.theta_scale, o.freq_factors);
+            kernels::rope(row(o.in, i), row(o.out, i), o.head_dim, position(i), o.theta_scale, o.freq_factors, o.mode);
         }
     }
     void execute(const op_attention& o) noexcept {

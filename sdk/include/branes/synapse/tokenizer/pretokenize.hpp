@@ -1,6 +1,6 @@
 #pragma once
 /// @file pretokenize.hpp
-/// @brief The Llama-3 pre-tokenizer: splits text into the words BPE merges within.
+/// @brief The Llama-3 and Qwen2 pre-tokenizers: split text into the words BPE merges within.
 ///
 /// Implements the split regex of Llama 3's tokenizer.json,
 ///
@@ -9,8 +9,9 @@
 ///
 /// as a hand-written matcher, a port of llama.cpp's
 /// unicode_regex_split_custom_llama3 (std::regex has no Unicode classes).
-/// Alternatives are tried in order at each position, so the result is the
-/// regex's leftmost-first match sequence.
+/// Qwen2's regex is the same with \p{N} in place of \p{N}{1,3}: each digit
+/// is a word of its own. Alternatives are tried in order at each position, so
+/// the result is the regex's leftmost-first match sequence.
 
 #include <branes/synapse/tokenizer/unicode.hpp>
 
@@ -21,9 +22,16 @@
 
 namespace branes::synapse::tokenizer {
 
+/// Which split regex a vocabulary uses (tokenizer.ggml.pre).
+enum class pre_style : std::uint8_t {
+    llama3,  ///< digits in runs of up to 3
+    qwen2,   ///< one digit per word
+};
+
 /// Lengths, in code points, of the consecutive words of cpts (they sum to
 /// cpts.size(); none is empty).
-inline std::vector<std::size_t> split_llama3(std::span<const std::uint32_t> cpts) {
+inline std::vector<std::size_t> split_words(std::span<const std::uint32_t> cpts, pre_style style) {
+    const std::size_t max_digits = style == pre_style::llama3 ? 3 : 1;
     std::vector<std::size_t> words;
     const std::size_t end = cpts.size();
     constexpr std::uint32_t out_of_range = 0xFFFFFFFF;
@@ -70,11 +78,11 @@ inline std::vector<std::size_t> split_llama3(std::span<const std::uint32_t> cpts
             continue;
         }
 
-        // \p{N}{1,3}
+        // \p{N}{1,3} (Llama 3) or \p{N} (Qwen2)
         if (number(pos)) {
             std::size_t start = pos;
             while (number(pos)) {
-                if (++pos - start >= 3) {
+                if (++pos - start >= max_digits) {
                     emit(pos);
                     start = pos;
                 }
@@ -125,6 +133,11 @@ inline std::vector<std::size_t> split_llama3(std::span<const std::uint32_t> cpts
         emit(++pos);  // no alternative matched: a word of its own
     }
     return words;
+}
+
+/// The Llama-3 split.
+inline std::vector<std::size_t> split_llama3(std::span<const std::uint32_t> cpts) {
+    return split_words(cpts, pre_style::llama3);
 }
 
 }  // namespace branes::synapse::tokenizer

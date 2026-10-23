@@ -1,17 +1,23 @@
 #pragma once
 /// @file llama.hpp
-/// @brief Build the decode graph of a Llama-architecture GGUF model.
+/// @brief Build the decode graph of a Llama-family GGUF model (Llama, Qwen2).
 ///
-/// The graph mirrors llama.cpp's llm_build_llama for one token per run:
+/// The graph mirrors llama.cpp's llm_build_llama and llm_build_qwen2:
 ///
 ///   x = embed(token_embd)
 ///   per layer:
 ///     h = rms_norm(x, attn_norm)
-///     q = rope(Wq h), k = rope(Wk h), v = Wv h
+///     q = rope(Wq h + bq), k = rope(Wk h + bk), v = Wv h + bv
 ///     x = x + Wo attention(q, k, v, kv_cache)
 ///     h = rms_norm(x, ffn_norm)
 ///     x = x + Wdown (silu(Wgate h) * Wup h)
-///   logits = Wout rms_norm(last_row(x), output_norm)   (Wout = token_embd if tied)
+///   logits = Wout rms_norm(last_row(x), output_norm) + bout   (Wout = token_embd if tied)
+///
+/// The architectures differ only where llama.cpp's builders do:
+///
+///   general.architecture   metadata keys   RoPE pairs        biases (optional)
+///   "llama"                llama.*         normal (2i, 2i+1)  none
+///   "qwen2"                qwen2.*         neox (i, i+d/2)    bq, bk, bv, bout
 ///
 /// A run processes up to max_batch tokens (prefill); only the last token's
 /// logits are computed, as llama.cpp does for a prompt.
@@ -37,10 +43,10 @@
 ///           the shape the config implies; on failure, what was wrong and,
 ///           for a key or tensor, its name. Never throws for bad input.
 ///
-/// Not supported (rejected, never silently mis-computed): attention or FFN
-/// biases, mixture-of-experts layers, partial rotary dimensions, RoPE
-/// scaling other than llama3-style frequency factors, and custom attention
-/// scales.
+/// Not supported (rejected, never silently mis-computed): biases other than
+/// those above, mixture-of-experts layers, partial rotary dimensions, RoPE
+/// scaling other than llama3-style frequency factors (Llama only), and custom
+/// attention scales.
 
 #include <branes/synapse/gguf/reader.hpp>
 #include <branes/synapse/gguf/tensor_view.hpp>
@@ -61,7 +67,16 @@
 
 namespace branes::synapse::models {
 
+/// The Llama-family architectures load_llama builds.
+enum class architecture : std::uint8_t { llama, qwen2 };
+
+constexpr std::string_view to_string(architecture a) noexcept {
+    return a == architecture::qwen2 ? "qwen2" : "llama";
+}
+
 struct llama_config {
+    architecture arch = architecture::llama;
+    kernels::rope_mode rope = kernels::rope_mode::normal;
     std::size_t n_layer = 0;
     std::size_t n_embd = 0;
     std::size_t n_ff = 0;
@@ -75,7 +90,7 @@ struct llama_config {
 };
 
 enum class model_errc : std::uint32_t {
-    wrong_architecture = 1,  ///< general.architecture is not "llama"
+    wrong_architecture = 1,  ///< general.architecture is not "llama" or "qwen2"
     missing_key,             ///< a required metadata key is absent
     bad_value,               ///< a key has the wrong type or an invalid value
     unsupported,             ///< a feature this loader does not implement
@@ -88,7 +103,7 @@ enum class model_errc : std::uint32_t {
 constexpr std::string_view to_string(model_errc code) noexcept {
     switch (code) {
     case model_errc::wrong_architecture:
-        return "not a llama model";
+        return "unsupported architecture";
     case model_errc::missing_key:
         return "missing metadata key";
     case model_errc::bad_value:
@@ -207,94 +222,103 @@ inline std::string layer_tensor(std::size_t layer, std::string_view suffix) {
 
 }  // namespace detail
 
-/// The hyperparameters of a Llama-architecture file.
+/// The hyperparameters of a Llama-family file, read from its "<arch>." keys.
 inline result<llama_config, model_error> read_llama_config(const gguf::gguf_file& f) {
     using detail::fail;
-    if (f.get<std::string_view>("general.architecture") != std::string_view{"llama"}) {
+    llama_config c;
+    const auto arch = f.get<std::string_view>("general.architecture");
+    if (arch == std::string_view{"llama"}) {
+        c.arch = architecture::llama;
+        c.rope = kernels::rope_mode::normal;
+    } else if (arch == std::string_view{"qwen2"}) {
+        c.arch = architecture::qwen2;
+        c.rope = kernels::rope_mode::neox;
+    } else {
         return fail(model_errc::wrong_architecture, "general.architecture");
     }
-    llama_config c;
-    const auto count = [&](std::string_view key, std::size_t& out) -> std::optional<model_error> {
-        auto r = detail::get_count(f, key);
+    const std::string prefix(to_string(c.arch));
+    const auto key = [&](std::string_view suffix) { return prefix + "." + std::string(suffix); };
+    const auto count = [&](const std::string& name, std::size_t& out) -> std::optional<model_error> {
+        auto r = detail::get_count(f, name);
         if (!r) {
             return r.error();
         }
         out = *r;
         return std::nullopt;
     };
-    for (auto [key, out] : {std::pair{"llama.block_count", &c.n_layer},
-                            std::pair{"llama.embedding_length", &c.n_embd},
-                            std::pair{"llama.feed_forward_length", &c.n_ff},
-                            std::pair{"llama.attention.head_count", &c.n_head},
-                            std::pair{"llama.context_length", &c.n_ctx_train}}) {
-        if (auto e = count(key, *out)) {
+    for (auto [suffix, out] : {std::pair{"block_count", &c.n_layer},
+                               std::pair{"embedding_length", &c.n_embd},
+                               std::pair{"feed_forward_length", &c.n_ff},
+                               std::pair{"attention.head_count", &c.n_head},
+                               std::pair{"context_length", &c.n_ctx_train}}) {
+        if (auto e = count(key(suffix), *out)) {
             return std::move(*e);
         }
         if (*out == 0) {
-            return fail(model_errc::bad_value, key);
+            return fail(model_errc::bad_value, key(suffix));
         }
     }
-    auto kv = detail::get_count(f, "llama.attention.head_count_kv", c.n_head);
+    auto kv = detail::get_count(f, key("attention.head_count_kv"), c.n_head);
     if (!kv) {
         return kv.error();
     }
     c.n_head_kv = *kv;
     if (c.n_head_kv == 0 || c.n_head % c.n_head_kv != 0) {
-        return fail(model_errc::bad_value, "llama.attention.head_count_kv");
+        return fail(model_errc::bad_value, key("attention.head_count_kv"));
     }
-    auto hd = detail::get_count(f, "llama.attention.key_length", c.n_embd / c.n_head);
+    auto hd = detail::get_count(f, key("attention.key_length"), c.n_embd / c.n_head);
     if (!hd) {
         return hd.error();
     }
     c.head_dim = *hd;
     if (c.head_dim == 0) {
-        return fail(model_errc::bad_value, "llama.attention.key_length");
+        return fail(model_errc::bad_value, key("attention.key_length"));
     }
-    auto vl = detail::get_count(f, "llama.attention.value_length", c.head_dim);
+    auto vl = detail::get_count(f, key("attention.value_length"), c.head_dim);
     if (!vl) {
         return vl.error();
     }
     if (*vl != c.head_dim) {
-        return fail(model_errc::unsupported, "llama.attention.value_length");
+        return fail(model_errc::unsupported, key("attention.value_length"));
     }
-    auto rot = detail::get_count(f, "llama.rope.dimension_count", c.head_dim);
+    auto rot = detail::get_count(f, key("rope.dimension_count"), c.head_dim);
     if (!rot) {
         return rot.error();
     }
     if (*rot != c.head_dim) {
-        return fail(model_errc::unsupported, "llama.rope.dimension_count");
+        return fail(model_errc::unsupported, key("rope.dimension_count"));
     }
-    auto eps = detail::get_positive(f, "llama.attention.layer_norm_rms_epsilon", std::nullopt);
+    auto eps = detail::get_positive(f, key("attention.layer_norm_rms_epsilon"), std::nullopt);
     if (!eps) {
         return eps.error();
     }
     c.rms_eps = *eps;
-    auto base = detail::get_positive(f, "llama.rope.freq_base", 10000.0f);
+    auto base = detail::get_positive(f, key("rope.freq_base"), 10000.0f);
     if (!base) {
         return base.error();
     }
     c.rope_base = *base;
 
-    if (f.find("llama.rope.scaling.type") != nullptr &&
-        f.get<std::string_view>("llama.rope.scaling.type") != std::string_view{"none"}) {
-        return fail(model_errc::unsupported, "llama.rope.scaling.type");
+    if (f.find(key("rope.scaling.type")) != nullptr &&
+        f.get<std::string_view>(key("rope.scaling.type")) != std::string_view{"none"}) {
+        return fail(model_errc::unsupported, key("rope.scaling.type"));
     }
-    if (f.find("llama.rope.scale_linear") != nullptr) {
-        return fail(model_errc::unsupported, "llama.rope.scale_linear");
+    if (f.find(key("rope.scale_linear")) != nullptr) {
+        return fail(model_errc::unsupported, key("rope.scale_linear"));
     }
     // llama.cpp scales positions by 1 / factor (linear scaling when the type
     // key is absent); 0 means unset and 1 is the identity, so only those load.
-    if (const gguf::metadata_value* v = f.find("llama.rope.scaling.factor")) {
+    if (const gguf::metadata_value* v = f.find(key("rope.scaling.factor"))) {
         const auto* factor = std::get_if<float>(v);
         if (factor == nullptr || (*factor != 0.0f && *factor != 1.0f)) {
-            return fail(model_errc::unsupported, "llama.rope.scaling.factor");
+            return fail(model_errc::unsupported, key("rope.scaling.factor"));
         }
     }
-    if (f.find("llama.attention.scale") != nullptr) {
-        return fail(model_errc::unsupported, "llama.attention.scale");
+    if (f.find(key("attention.scale")) != nullptr) {
+        return fail(model_errc::unsupported, key("attention.scale"));
     }
-    if (auto experts = detail::get_count(f, "llama.expert_count", 0); !experts || *experts != 0) {
-        return fail(model_errc::unsupported, "llama.expert_count");
+    if (auto experts = detail::get_count(f, key("expert_count"), 0); !experts || *experts != 0) {
+        return fail(model_errc::unsupported, key("expert_count"));
     }
 
     const gguf::tensor_info* embd = f.find_tensor("token_embd.weight");
@@ -308,7 +332,7 @@ inline result<llama_config, model_error> read_llama_config(const gguf::gguf_file
     return c;
 }
 
-/// The decode graph of a Llama-architecture file, with KV caches of max_ctx
+/// The decode graph of a Llama-family file, with KV caches of max_ctx
 /// positions, for runs of up to max_batch tokens.  See the file comment for
 /// the contract.
 inline result<llama_model, model_error>
@@ -330,6 +354,9 @@ load_llama(const gguf::gguf_file& f, std::size_t max_ctx, std::size_t max_batch 
 
     std::vector<float> freq_factors;
     if (const gguf::tensor_info* rf = f.find_tensor("rope_freqs.weight")) {
+        if (c.arch != architecture::llama) {
+            return fail(model_errc::unsupported, "rope_freqs.weight");  // llama.cpp reads it for Llama only
+        }
         if (rf->type != quant::tensor_type::f32) {
             return fail(model_errc::unsupported_type, "rope_freqs.weight");
         }
@@ -359,6 +386,24 @@ load_llama(const gguf::gguf_file& f, std::size_t max_ctx, std::size_t max_batch 
     if (error) {
         return std::move(*error);
     }
+    // The biases an architecture may have (all optional; others are rejected).
+    const bool qkv_bias = c.arch == architecture::qwen2;
+    const bool output_bias = c.arch == architecture::qwen2;
+    // bound when present: 1 x rows, or invalid
+    const auto bias = [&](const std::string& name, std::size_t rows) -> std::optional<graph::matrix_ref> {
+        if (f.find_tensor(name) == nullptr) {
+            return std::nullopt;
+        }
+        return weight(name, 1, rows);
+    };
+    // w h, plus the bias if there is one
+    const auto linear = [&](const graph::matrix_ref& w,
+                            const std::optional<graph::matrix_ref>& bv,
+                            graph::tensor_id h) -> graph::tensor_id {
+        const graph::tensor_id y = b.matmul(w, h);
+        return bv ? b.add_bias(y, *bv) : y;
+    };
+
     graph::tensor_id x = b.embed(embd);
     const float scale = 1.0f / std::sqrt(static_cast<float>(c.head_dim));
     for (std::size_t l = 0; l < c.n_layer; ++l) {
@@ -374,6 +419,12 @@ load_llama(const gguf::gguf_file& f, std::size_t max_ctx, std::size_t max_batch 
         const graph::matrix_ref gate = w("ffn_gate.weight", c.n_ff, c.n_embd);
         const graph::matrix_ref up = w("ffn_up.weight", c.n_ff, c.n_embd);
         const graph::matrix_ref down = w("ffn_down.weight", c.n_embd, c.n_ff);
+        std::optional<graph::matrix_ref> bq, bk, bv;
+        if (qkv_bias) {
+            bq = bias(detail::layer_tensor(l, "attn_q.bias"), q_rows);
+            bk = bias(detail::layer_tensor(l, "attn_k.bias"), kv_rows);
+            bv = bias(detail::layer_tensor(l, "attn_v.bias"), kv_rows);
+        }
         if (error) {
             return std::move(*error);
         }
@@ -389,15 +440,18 @@ load_llama(const gguf::gguf_file& f, std::size_t max_ctx, std::size_t max_batch 
                                        "ffn_up.bias",
                                        "ffn_down.bias",
                                        "ffn_gate_inp.weight"}) {
+            if (qkv_bias && extra.starts_with("attn_") && extra != "attn_output.bias") {
+                continue;  // bound above
+            }
             if (const std::string name = detail::layer_tensor(l, extra); f.find_tensor(name) != nullptr) {
                 return fail(model_errc::unsupported, name);
             }
         }
 
         const graph::tensor_id h = b.rms_norm(x, attn_norm, c.rms_eps);
-        const graph::tensor_id q = b.rope(b.matmul(wq, h), c.head_dim, c.rope_base, freq_factors);
-        const graph::tensor_id k = b.rope(b.matmul(wk, h), c.head_dim, c.rope_base, freq_factors);
-        const graph::tensor_id v = b.matmul(wv, h);
+        const graph::tensor_id q = b.rope(linear(wq, bq, h), c.head_dim, c.rope_base, freq_factors, c.rope);
+        const graph::tensor_id k = b.rope(linear(wk, bk, h), c.head_dim, c.rope_base, freq_factors, c.rope);
+        const graph::tensor_id v = linear(wv, bv, h);
         const graph::state_id cache = b.kv_cache(max_ctx, c.n_head_kv, c.head_dim);
         const graph::tensor_id attn = b.attention(q, k, v, cache, c.n_head, scale);
         x = b.add(b.matmul(wo, attn), x);
@@ -409,10 +463,14 @@ load_llama(const gguf::gguf_file& f, std::size_t max_ctx, std::size_t max_batch 
     const graph::matrix_ref out_norm = weight("output_norm.weight", 1, c.n_embd);
     const graph::matrix_ref out =
         f.find_tensor("output.weight") != nullptr ? weight("output.weight", c.n_vocab, c.n_embd) : embd;
+    if (!output_bias && f.find_tensor("output.bias") != nullptr) {
+        return fail(model_errc::unsupported, "output.bias");
+    }
+    const std::optional<graph::matrix_ref> out_bias = output_bias ? bias("output.bias", c.n_vocab) : std::nullopt;
     if (error) {
         return std::move(*error);
     }
-    const graph::tensor_id logits = b.matmul(out, b.rms_norm(b.last_row(x), out_norm, c.rms_eps));
+    const graph::tensor_id logits = linear(out, out_bias, b.rms_norm(b.last_row(x), out_norm, c.rms_eps));
     b.output(logits);
 
     auto g = std::move(b).finalize();

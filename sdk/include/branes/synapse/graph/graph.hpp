@@ -29,8 +29,9 @@
 ///   state_desc — a KV cache layer: max_ctx rows of n_kv_heads * head_dim
 ///     F16 keys and as many values
 ///
-///   node = std::variant<op_matmul, op_add, op_mul, op_silu, op_softmax,
-///                       op_rms_norm, op_embed, op_rope, op_attention>
+///   node = std::variant<op_matmul, op_add, op_add_bias, op_mul, op_silu,
+///                       op_softmax, op_rms_norm, op_embed, op_rope,
+///                       op_attention, op_last_row>
 ///     each op names its operand and result tensors by tensor_id; op_matmul
 ///     and op_attention also name a scratch tensor, and op_attention the
 ///     state it reads and appends to
@@ -64,7 +65,8 @@
 ///   I7: every state is read and written by at most one attention node
 ///                                                   — constrains nodes_, states_
 ///   I8: an op's operands and result agree in batching: element-wise ops
-///       take operands that are both batched or both single-row; embed,
+///       take operands that are both batched or both single-row (add_bias
+///       and rms_norm keep their operand's batching); embed,
 ///       rope and attention work on batched tensors; last_row turns a
 ///       batched tensor into a single-row one
 ///                                                   — constrains nodes_, tensors_
@@ -155,6 +157,11 @@ struct op_matmul {  ///< out = w * in (gemv)
 struct op_add {  ///< out = a + b
     tensor_id a, b, out;
 };
+struct op_add_bias {  ///< out = in + bias, the bias added to every row
+    tensor_id in;
+    matrix_ref bias;  ///< 1 x size
+    tensor_id out;
+};
 struct op_mul {  ///< out = a * b, element-wise
     tensor_id a, b, out;
 };
@@ -180,6 +187,7 @@ struct op_rope {  ///< out = in with each head rotated by the step's position
     std::size_t head_dim;
     float theta_scale;                ///< base^(-2 / head_dim)
     std::vector<float> freq_factors;  ///< empty, or head_dim / 2 divisors of theta
+    kernels::rope_mode mode;          ///< which elements form a pair
 };
 struct op_attention {  ///< append (k, v) to cache; out = causal attention of q over it
     tensor_id q, k, v, out, scratch;
@@ -192,8 +200,17 @@ struct op_last_row {  ///< out = row n-1 of in (the last token of the run)
     tensor_id in, out;
 };
 
-using node = std::
-    variant<op_matmul, op_add, op_mul, op_silu, op_softmax, op_rms_norm, op_embed, op_rope, op_attention, op_last_row>;
+using node = std::variant<op_matmul,
+                          op_add,
+                          op_add_bias,
+                          op_mul,
+                          op_silu,
+                          op_softmax,
+                          op_rms_norm,
+                          op_embed,
+                          op_rope,
+                          op_attention,
+                          op_last_row>;
 
 /// Operand (read) tensors of a node.
 inline std::vector<tensor_id> operands(const node& n) {
@@ -203,6 +220,9 @@ inline std::vector<tensor_id> operands(const node& n) {
         }
         std::vector<tensor_id> operator()(const op_add& o) const {
             return {o.a, o.b};
+        }
+        std::vector<tensor_id> operator()(const op_add_bias& o) const {
+            return {o.in};
         }
         std::vector<tensor_id> operator()(const op_mul& o) const {
             return {o.a, o.b};
@@ -420,6 +440,22 @@ public:
     tensor_id mul(tensor_id a, tensor_id b) {
         return binary<op_mul>(a, b);
     }
+
+    /// x + bias, the bias added to each row of x.
+    ///   Pre (checked): bias is 1 x x.size (I2). The result has x's batching (I8).
+    tensor_id add_bias(tensor_id x, const matrix_ref& bias) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        if (rows(bias) != 1 || cols(bias) != size_of(x)) {
+            return fail(graph_errc::size_mismatch);
+        }
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x));
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_add_bias{x, bias, out});
+        }
+        return out;
+    }
     tensor_id silu(tensor_id x) {
         return unary<op_silu>(x);
     }
@@ -459,11 +495,16 @@ public:
     }
 
     /// x, viewed as heads of head_dim floats, each rotated by the run's
-    /// position with theta_i = pos * base^(-2i / head_dim) / freq_factors[i].
+    /// position with theta_i = pos * base^(-2i / head_dim) / freq_factors[i],
+    /// pairing elements as mode says.
     ///   Pre (checked): I6 (head_dim even, x.size a multiple of it); base and
     ///   every freq factor finite and positive; freq_factors empty or of size
     ///   head_dim / 2.
-    tensor_id rope(tensor_id x, std::size_t head_dim, float base, std::span<const float> freq_factors = {}) {
+    tensor_id rope(tensor_id x,
+                   std::size_t head_dim,
+                   float base,
+                   std::span<const float> freq_factors = {},
+                   kernels::rope_mode mode = kernels::rope_mode::normal) {
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
@@ -481,7 +522,8 @@ public:
                                            out,
                                            head_dim,
                                            kernels::rope_theta_scale(base, head_dim),
-                                           std::vector<float>(freq_factors.begin(), freq_factors.end())});
+                                           std::vector<float>(freq_factors.begin(), freq_factors.end()),
+                                           mode});
         }
         return out;
     }
