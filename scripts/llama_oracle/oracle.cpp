@@ -21,6 +21,15 @@
 //       and an output bias. The quantized one ties its output to the
 //       embedding; the F32 one has its own output matrix.
 //
+//   oracle mistral3-tiny <model.gguf> <golden.gguf>
+//   oracle mistral3-tiny-f32 <model.gguf> <golden.gguf>
+//       The two models as Mistral 3 (general.architecture "mistral3"): YaRN
+//       RoPE scaling (factor 4, original context 4, beta fast/slow chosen so
+//       the extrapolation ramp spans the middle pairs), the attention
+//       temperature (scale 0.5, so Q is rescaled from position 4 on), and
+//       F32 biases on Q, K, V, the attention output and the three FFN
+//       matrices. The F32 one also sets a YaRN log multiplier (0.5).
+//
 //   oracle logits <model.gguf> <golden.gguf> <token>...
 //       Decodes the given tokens through an existing model.
 //
@@ -69,6 +78,7 @@ struct tiny_config {
     layer_types layers[n_layer];
     const char* arch = "llama";
     ggml_type output = GGML_TYPE_COUNT;  // its own output matrix, or COUNT for tied
+    float yarn_log_mul = 0.0f;           // mistral3: written when non-zero
 
     uint32_t head_dim() const {
         return n_embd / n_head;
@@ -95,6 +105,14 @@ constexpr tiny_config qwen2_quantized{quantized.n_embd,
                                       {quantized.layers[0], quantized.layers[1]},
                                       "qwen2"};
 constexpr tiny_config qwen2_plain{64, 128, 128, GGML_TYPE_F32, {all_f32, all_f32}, "qwen2", GGML_TYPE_F32};
+
+constexpr tiny_config mistral3_quantized{quantized.n_embd,
+                                         quantized.n_ff,
+                                         quantized.n_vocab,
+                                         quantized.embd,
+                                         {quantized.layers[0], quantized.layers[1]},
+                                         "mistral3"};
+constexpr tiny_config mistral3_plain{64, 128, 128, GGML_TYPE_F32, {all_f32, all_f32}, "mistral3", GGML_TYPE_F32, 0.5f};
 
 std::mt19937 rng(20261021);
 
@@ -130,6 +148,7 @@ void write_tiny_model(const tiny_config& cfg, const char* path) {
 
     const std::string arch = cfg.arch;
     const bool qwen2 = arch == "qwen2";
+    const bool mistral3 = arch == "mistral3";
     const auto key = [&](const char* suffix) { return arch + "." + suffix; };
     gguf_set_val_str(out, "general.architecture", arch.c_str());
     gguf_set_val_str(out, "general.name", ("synapse tiny " + arch + " (random weights)").c_str());
@@ -145,6 +164,17 @@ void write_tiny_model(const tiny_config& cfg, const char* path) {
         gguf_set_val_u32(out, key("rope.dimension_count").c_str(), head_dim);
     }
     gguf_set_val_u32(out, key("vocab_size").c_str(), n_vocab);
+    if (mistral3) {
+        gguf_set_val_str(out, key("rope.scaling.type").c_str(), "yarn");
+        gguf_set_val_f32(out, key("rope.scaling.factor").c_str(), 4.0f);
+        gguf_set_val_u32(out, key("rope.scaling.original_context_length").c_str(), 4);
+        gguf_set_val_f32(out, key("rope.scaling.yarn_beta_fast").c_str(), 0.05f);
+        gguf_set_val_f32(out, key("rope.scaling.yarn_beta_slow").c_str(), 0.001f);
+        if (cfg.yarn_log_mul != 0.0f) {
+            gguf_set_val_f32(out, key("rope.scaling.yarn_log_multiplier").c_str(), cfg.yarn_log_mul);
+        }
+        gguf_set_val_f32(out, key("attention.temperature_scale").c_str(), 0.5f);
+    }
     gguf_set_val_str(out, "tokenizer.ggml.model", "none");
 
     const float wscale = 1.0f / std::sqrt(static_cast<float>(n_embd));
@@ -156,7 +186,7 @@ void write_tiny_model(const tiny_config& cfg, const char* path) {
 
     if (qwen2) {
         add_weight(ctx, out, "output.bias", GGML_TYPE_F32, 1, n_vocab, 0.0f, 0.5f);
-    } else {
+    } else if (!mistral3) {
         // llama3-style frequency factors: 1 for high frequencies, up to 8 for low.
         ggml_tensor* rf = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, head_dim / 2);
         ggml_set_name(rf, "rope_freqs.weight");
@@ -179,6 +209,15 @@ void write_tiny_model(const tiny_config& cfg, const char* path) {
             add_weight(ctx, out, p + "attn_q.bias", GGML_TYPE_F32, 1, n_head * head_dim, 0.0f, 0.5f);
             add_weight(ctx, out, p + "attn_k.bias", GGML_TYPE_F32, 1, n_head_kv * head_dim, 0.0f, 0.5f);
             add_weight(ctx, out, p + "attn_v.bias", GGML_TYPE_F32, 1, n_head_kv * head_dim, 0.0f, 0.5f);
+        }
+        if (mistral3) {  // every bias llama.cpp's mistral3 loader accepts
+            add_weight(ctx, out, p + "attn_q.bias", GGML_TYPE_F32, 1, n_head * head_dim, 0.0f, 0.1f);
+            add_weight(ctx, out, p + "attn_k.bias", GGML_TYPE_F32, 1, n_head_kv * head_dim, 0.0f, 0.1f);
+            add_weight(ctx, out, p + "attn_v.bias", GGML_TYPE_F32, 1, n_head_kv * head_dim, 0.0f, 0.1f);
+            add_weight(ctx, out, p + "attn_output.bias", GGML_TYPE_F32, 1, n_embd, 0.0f, 0.1f);
+            add_weight(ctx, out, p + "ffn_gate.bias", GGML_TYPE_F32, 1, n_ff, 0.0f, 0.1f);
+            add_weight(ctx, out, p + "ffn_up.bias", GGML_TYPE_F32, 1, n_ff, 0.0f, 0.1f);
+            add_weight(ctx, out, p + "ffn_down.bias", GGML_TYPE_F32, 1, n_embd, 0.0f, 0.1f);
         }
         add_weight(ctx, out, p + "ffn_norm.weight", GGML_TYPE_F32, 1, n_embd, 1.0f, 0.1f);
         add_weight(ctx, out, p + "ffn_gate.weight", t.gate, n_ff, n_embd, 0.0f, wscale);
@@ -350,11 +389,13 @@ int main(int argc, char** argv) {
     const tiny_config* tiny = nullptr;
     if (argc == 4) {
         const std::string mode = argv[1];
-        tiny = mode == "tiny"             ? &quantized
-               : mode == "tiny-f32"       ? &plain
-               : mode == "qwen2-tiny"     ? &qwen2_quantized
-               : mode == "qwen2-tiny-f32" ? &qwen2_plain
-                                          : nullptr;
+        tiny = mode == "tiny"                ? &quantized
+               : mode == "tiny-f32"          ? &plain
+               : mode == "qwen2-tiny"        ? &qwen2_quantized
+               : mode == "qwen2-tiny-f32"    ? &qwen2_plain
+               : mode == "mistral3-tiny"     ? &mistral3_quantized
+               : mode == "mistral3-tiny-f32" ? &mistral3_plain
+                                             : nullptr;
     }
     if (tiny != nullptr) {
         const tiny_config& cfg = *tiny;
@@ -379,12 +420,13 @@ int main(int argc, char** argv) {
         write_golden(argv[2], argv[3], tokens);
         return 0;
     }
-    std::fprintf(stderr,
-                 "usage: %s tiny|tiny-f32|qwen2-tiny|qwen2-tiny-f32 <model.gguf> <golden.gguf>\n"
-                 "       %s logits <model.gguf> <golden.gguf> <token>...\n"
-                 "       %s tokenize <vocab.gguf> <cases.txt> <golden.gguf>\n",
-                 argv[0],
-                 argv[0],
-                 argv[0]);
+    std::fprintf(
+        stderr,
+        "usage: %s tiny|tiny-f32|qwen2-tiny|qwen2-tiny-f32|mistral3-tiny|mistral3-tiny-f32 <model.gguf> <golden.gguf>\n"
+        "       %s logits <model.gguf> <golden.gguf> <token>...\n"
+        "       %s tokenize <vocab.gguf> <cases.txt> <golden.gguf>\n",
+        argv[0],
+        argv[0],
+        argv[0]);
     return 2;
 }

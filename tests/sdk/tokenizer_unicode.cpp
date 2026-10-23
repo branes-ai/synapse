@@ -1,4 +1,5 @@
-// Unit tests for the tokenizer's Unicode layer and the Llama-3 pre-tokenizer.
+// Unit tests for the tokenizer's Unicode layer and the Llama-3 and Tekken
+// pre-tokenizers.
 // (Agreement with llama.cpp on whole inputs is checked by tokenizer_golden.)
 
 #include <branes/synapse/tokenizer/pretokenize.hpp>
@@ -16,11 +17,11 @@ using namespace branes::synapse::tokenizer;
 
 namespace {
 
-std::vector<std::string> words(std::string_view text) {
+std::vector<std::string> words(std::string_view text, pre_style style = pre_style::llama3) {
     const auto cpts = decode_utf8(text);
     std::vector<std::string> out;
     std::size_t start = 0;
-    for (std::size_t len : split_llama3(cpts)) {
+    for (std::size_t len : split_words(cpts, style)) {
         std::string w;
         for (std::size_t i = start; i < start + len; ++i) {
             append_utf8(cpts[i], w);
@@ -29,6 +30,10 @@ std::vector<std::string> words(std::string_view text) {
         start += len;
     }
     return out;
+}
+
+std::vector<std::string> tekken_words(std::string_view text) {
+    return words(text, pre_style::tekken);
 }
 
 }  // namespace
@@ -101,4 +106,50 @@ TEST_CASE("tokenizer_unicode: the Llama-3 split regex", "[tokenizer][pretokenize
         total += len;
     }
     CHECK(total == cpts.size());
+}
+
+// Expected splits are llama.cpp's own: unicode_regex_split with Tekken's
+// regex (llama-vocab.cpp, LLAMA_VOCAB_PRE_TYPE_TEKKEN) at e6f2ec01f. Many of
+// these splits leave the tokens unchanged for any vocabulary trained with
+// the same regex, so the golden tests cannot see them; this pins them.
+TEST_CASE("tokenizer_unicode: the Tekken split regex", "[tokenizer][pretokenize][tekken]") {
+    using V = std::vector<std::string>;
+    // U*L+ splits CamelCase; U* gives back the last capital to a lowercase run.
+    CHECK(tekken_words("HelloWorld XMLHttpRequest iPhone McDonald's") ==
+          V{"Hello", "World", " XMLHttp", "Request", " i", "Phone", " Mc", "Donald", "'s"});
+    // A non-ASCII letter is both upper and lower case.
+    CHECK(tekken_words("\xc3\x89"
+                       "COLE \xc3\x89"
+                       "cole \xc3\xa9"
+                       "COLE \xc3\x80"
+                       "BCdef") == V{"\xc3\x89",
+                                     "COLE",
+                                     " \xc3\x89"
+                                     "cole",
+                                     " \xc3\xa9",
+                                     "COLE",
+                                     " \xc3\x80"
+                                     "BCdef"});
+    CHECK(tekken_words("\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82\xd0\x9c\xd0\xb8\xd1\x80 "
+                       "\xd0\x9f\xd0\xa0\xd0\x98\xd0\x92\xd0\x95\xd0\xa2\xd0\xbc\xd0\xb8\xd1\x80") ==
+          V{"\xd0\x9f\xd1\x80\xd0\xb8\xd0\xb2\xd0\xb5\xd1\x82\xd0\x9c\xd0\xb8\xd1\x80",
+            " \xd0\x9f\xd0\xa0\xd0\x98\xd0\x92\xd0\x95\xd0\xa2\xd0\xbc\xd0\xb8\xd1\x80"});
+    // Punctuation runs take trailing newlines and slashes.
+    CHECK(tekken_words("end.\n/next !\r\n//x") == V{"end", ".\n/", "next", " !\r\n//", "x"});
+    CHECK(tekken_words("a/b ../up") == V{"a", "/b", " ../", "up"});
+    // One digit per word.
+    CHECK(tekken_words("x1Y22 ABC123def") == V{"x", "1", "Y", "2", "2", " ABC", "1", "2", "3", "def"});
+    // A combining mark (U+0301) is not a letter: it prefixes the next run.
+    CHECK(tekken_words("e\xcc\x81"
+                       "cole MIXED\xcc\x81"
+                       "case") == V{"e",
+                                    "\xcc\x81"
+                                    "cole",
+                                    " MIXED",
+                                    "\xcc\x81"
+                                    "case"});
+    CHECK(tekken_words("  two  spaces\t\ttabs ") == V{" ", " two", " ", " spaces", "\t", "\ttabs", " "});
+    // No contractions.
+    CHECK(tekken_words("it's 'S") == V{"it", "'s", " '", "S"});
+    CHECK(tekken_words("(Paren) [x]") == V{"(Paren", ")", " [", "x", "]"});
 }

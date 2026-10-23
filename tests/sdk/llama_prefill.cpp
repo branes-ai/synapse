@@ -2,7 +2,7 @@
 // for bit) and the token-by-token order of the per-row kernels, running a
 // prompt in batches must give exactly the logits, and leave exactly the KV
 // cache, of decoding it one token at a time. Checked bit for bit on the two
-// llama.cpp-generated tiny models (Llama and Qwen2), for one batch, uneven chunks, and decoding
+// llama.cpp-generated tiny models (Llama, Qwen2 and Mistral 3), for one batch, uneven chunks, and decoding
 // on after a prefill; and the batched logits are checked against llama.cpp.
 
 #include "../support/llama_golden.hpp"
@@ -21,7 +21,9 @@ TEST_CASE("llama_prefill: batched runs reproduce token-by-token decoding bit for
     const std::string name = GENERATE(std::string("llama_tiny"),
                                       std::string("llama_tiny_f32"),
                                       std::string("qwen2_tiny"),
-                                      std::string("qwen2_tiny_f32"));
+                                      std::string("qwen2_tiny_f32"),
+                                      std::string("mistral3_tiny"),
+                                      std::string("mistral3_tiny_f32"));
     const std::string dir = SYNAPSE_TEST_DATA_DIR;
     const auto files = synapse_test::open_golden(dir + "/" + name + ".gguf", dir + "/" + name + "_golden.gguf");
     const auto& tokens = files->tokens;
@@ -50,7 +52,8 @@ TEST_CASE("llama_prefill: batched runs reproduce token-by-token decoding bit for
 }
 
 TEST_CASE("llama_prefill: batched logits match llama.cpp", "[llama][prefill][golden]") {
-    const std::string name = GENERATE(std::string("llama_tiny_f32"), std::string("qwen2_tiny_f32"));
+    const std::string name =
+        GENERATE(std::string("llama_tiny_f32"), std::string("qwen2_tiny_f32"), std::string("mistral3_tiny_f32"));
     INFO(name);
     const std::string dir = SYNAPSE_TEST_DATA_DIR;
     const auto files = synapse_test::open_golden(dir + "/" + name + ".gguf", dir + "/" + name + "_golden.gguf");

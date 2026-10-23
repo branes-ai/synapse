@@ -321,3 +321,47 @@ TEST_CASE("graph_builder: rope records its pairing mode", "[graph][attention]") 
     CHECK(std::get<op_rope>(g->nodes()[0]).mode == branes::synapse::kernels::rope_mode::normal);
     CHECK(std::get<op_rope>(g->nodes()[1]).mode == branes::synapse::kernels::rope_mode::neox);
 }
+
+TEST_CASE("graph_builder: attn_temperature and rope scaling are checked", "[graph][attention][yarn]") {
+    namespace k = branes::synapse::kernels;
+    {
+        graph_builder b(4);
+        const tensor_id x = b.input(64);
+        k::rope_scaling yarn;
+        yarn.freq_scale = 0.25f;
+        yarn.ext_factor = 1.0f;
+        yarn.corr_low = 2.0f;
+        yarn.corr_high = 6.0f;
+        const tensor_id q = b.attn_temperature(b.rope(x, 16, 1e4f, {}, k::rope_mode::normal, yarn), 0.1f, 4);
+        b.output(q);
+        auto g = std::move(b).finalize();
+        REQUIRE(g);
+        CHECK(std::get<op_rope>(g->nodes()[0]).scaling.freq_scale == 0.25f);
+        const auto& t = std::get<op_attn_temperature>(g->nodes()[1]);
+        CHECK(t.scale == 0.1f);
+        CHECK(t.floor_len == 4);
+        CHECK(g->tensors()[q].batched);
+    }
+    const auto error_of = [](auto build) {
+        graph_builder b(2);
+        build(b);
+        const auto g = std::move(b).finalize();
+        REQUIRE_FALSE(g);
+        return g.error().code;
+    };
+    const float inf = std::numeric_limits<float>::infinity();
+    CHECK(error_of([](graph_builder& b) { b.attn_temperature(b.last_row(b.input(16)), 0.1f, 4); }) ==
+          graph_errc::bad_shape);  // I8: per-position, so batched
+    CHECK(error_of([](graph_builder& b) { b.attn_temperature(b.input(16), 0.1f, 0); }) == graph_errc::bad_parameter);
+    CHECK(error_of([&](graph_builder& b) { b.attn_temperature(b.input(16), inf, 4); }) == graph_errc::bad_parameter);
+    for (int bad = 0; bad < 4; ++bad) {
+        k::rope_scaling s;
+        (bad == 0   ? s.freq_scale
+         : bad == 1 ? s.attn_factor
+         : bad == 2 ? s.ext_factor
+                    : s.corr_high) = bad < 2 ? 0.0f : inf;
+        INFO("bad field " << bad);
+        CHECK(error_of([&](graph_builder& b) { b.rope(b.input(16), 16, 1e4f, {}, k::rope_mode::normal, s); }) ==
+              graph_errc::bad_parameter);
+    }
+}
