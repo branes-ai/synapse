@@ -16,11 +16,15 @@
 //     boundary: the logits then move by up to a few 1e-5 (seen on
 //     qwen2_tiny_f32, whose biases sharpen attention). Most positions agree
 //     to ~1e-7; a semantic error is 1e-2 or more. The bound is 1e-4.
-//   - llama_tiny: Q4_K/Q6_K/Q8_0/Q4_0/F32 weights. On the generating machine
+//   - llama_tiny: Q4_K/Q6_K/Q8_0/Q5_0/Q4_0/F32 weights. On the generating machine
 //     it also agrees to ~1e-7, but a transformer amplifies any one flipped
 //     8-bit activation rounding (an ulp of exp or cos differs between C
-//     runtimes) to ~1e-2 in the logits; an error in a quantized format would
-//     be O(1). The bound is 1e-2 RMS, and 5e-2 for mistral3_tiny, which
+//     runtimes, and Highway's lane order differs from ggml's) to ~1e-2 in the
+//     logits, and the KV cache carries it to every later position; an error
+//     in a quantized format is O(1) (dropping or swapping Q5_0's 5th bits
+//     gives ~1.6). The bound is 2e-2 RMS: in the Highway build llama_tiny
+//     flips at position 3 and qwen2_tiny at 11, up to 1.15e-2, while the
+//     scalar build stays ~1e-7. It is 5e-2 for mistral3_tiny, which
 //     shows two such flips, 2e-2 at position 15 and 7e-3 at position 7
 //     (every other position ~1e-7), in both the scalar and the Highway
 //     build. They trace to RoPE:
@@ -58,7 +62,7 @@ TEST_CASE("llama_golden: decode logits match llama.cpp on the tiny model", "[lla
     for (std::size_t i = 0; i < run.positions.size(); ++i) {
         const auto& m = run.positions[i];
         INFO("position " << i << ": rel max err " << m.rel_max_err << ", rel rms err " << m.rel_rms_err);
-        CHECK(m.rel_rms_err < (name == "mistral3_tiny" ? 5e-2 : 1e-2));
+        CHECK(m.rel_rms_err < (name == "mistral3_tiny" ? 5e-2 : 2e-2));
         CHECK(m.same_argmax);
     }
 }

@@ -64,7 +64,7 @@ std::size_t bit_mismatches(const std::vector<float>& a, const std::vector<float>
 }  // namespace
 
 TEST_CASE("quant_golden: every format decodes bit-exactly to the gguf-py reference", "[quant][golden]") {
-    const std::string name = GENERATE("f16", "bf16", "q4_0", "q8_0", "q8_0.3d", "q4_k", "q6_k");
+    const std::string name = GENERATE("f16", "bf16", "q4_0", "q5_0", "q8_0", "q8_0.3d", "q4_k", "q6_k");
     INFO("tensor " << name);
     const auto& file = fixture();
     const auto* q = file.find_tensor(name + ".q");

@@ -64,6 +64,8 @@ bool visit_matrix(const gguf_file& file, const tensor_info& t, F&& fn) {
         return detail::visit_as<tensor_type::bf16>(file, t, std::forward<F>(fn));
     case tensor_type::q4_0:
         return detail::visit_as<tensor_type::q4_0>(file, t, std::forward<F>(fn));
+    case tensor_type::q5_0:
+        return detail::visit_as<tensor_type::q5_0>(file, t, std::forward<F>(fn));
     case tensor_type::q8_0:
         return detail::visit_as<tensor_type::q8_0>(file, t, std::forward<F>(fn));
     case tensor_type::q4_k:

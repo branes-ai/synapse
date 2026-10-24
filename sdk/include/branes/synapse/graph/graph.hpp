@@ -127,6 +127,7 @@ using matrix_ref = std::variant<std::monostate,
                                 mtl::mat::block_matrix_view<quant::scheme<tensor_type::f16>>,
                                 mtl::mat::block_matrix_view<quant::scheme<tensor_type::bf16>>,
                                 mtl::mat::block_matrix_view<quant::scheme<tensor_type::q4_0>>,
+                                mtl::mat::block_matrix_view<quant::scheme<tensor_type::q5_0>>,
                                 mtl::mat::block_matrix_view<quant::scheme<tensor_type::q8_0>>,
                                 mtl::mat::block_matrix_view<quant::scheme<tensor_type::q4_k>>,
                                 mtl::mat::block_matrix_view<quant::scheme<tensor_type::q6_k>>>;

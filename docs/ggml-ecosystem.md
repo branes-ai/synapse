@@ -162,6 +162,7 @@ ggml's quantized formats store a matrix row as consecutive **blocks**, each hold
 | format | weights per block | bytes | layout |
 |---|---|---|---|
 | Q4_0 | 32 | 18 | fp16 scale `d`; 32 4-bit quants; `w = d·(q − 8)` |
+| Q5_0 | 32 | 22 | fp16 `d`; 32-bit `qh` holding each quant's 5th bit; 32 4-bit low parts; `w = d·(q − 16)` |
 | Q8_0 | 32 | 34 | fp16 `d`; 32 int8 quants; `w = d·q` |
 | Q4_K | 256 | 144 | fp16 `d`, `dmin`; 8 sub-blocks of 32, each with a 6-bit scale and min; `w = d·sc·q − dmin·m` |
 | Q6_K | 256 | 210 | fp16 `d`; 16 sub-blocks of 16 with int8 scales; 6-bit quants split into a 4-bit and a 2-bit plane |
@@ -172,7 +173,7 @@ The K-quants (Q2_K through Q6_K) are "super-blocks" of 256 weights whose sub-blo
 ### Products: weights against quantized activations
 
 The CPU backend never expands a quantized weight matrix to float for a matrix product. The flow, from `type_traits_cpu` in `ggml/src/ggml-cpu/ggml-cpu.c`:
-- **`vec_dot_type`:** every weight type names one. It is Q8_0 for Q4_0 and Q8_0, Q8_K for the K-quants, and F16 for F16.
+- **`vec_dot_type`:** every weight type names one. It is Q8_0 for Q4_0, Q5_0 and Q8_0, Q8_K for the K-quants, and F16 for F16.
 - **Quantizing the activations:** before a product the activations are converted to that type, once per row of activations (`from_float`).
 - **The dot product:** each weight block is dotted with the matching activation block in integer arithmetic (`vec_dot`, e.g. `ggml_vec_dot_q4_K_q8_K`). Only the per-block scales are float.
 

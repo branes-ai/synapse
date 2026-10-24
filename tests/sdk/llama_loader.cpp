@@ -28,7 +28,7 @@ using models::model_errc;
 namespace {
 
 constexpr std::uint32_t f32_tag = 0;
-constexpr std::uint32_t q5_0_tag = 6;  // a format synapse has no scheme for
+constexpr std::uint32_t q5_1_tag = 7;  // a format synapse has no scheme for
 
 constexpr std::uint32_t n_embd = 32, n_ff = 64, n_head = 4, n_head_kv = 2, head_dim = 8, n_vocab = 16;
 
@@ -79,7 +79,7 @@ struct model_spec {
             for (auto d : t.ne) {
                 n *= d;
             }
-            return static_cast<std::size_t>(t.type == q5_0_tag ? n / 32 * 22 : n * sizeof(float));
+            return static_cast<std::size_t>(t.type == q5_1_tag ? n / 32 * 24 : n * sizeof(float));
         };
         writer w;
         w.put<std::uint32_t>(0x46554747).put<std::uint32_t>(3);
@@ -369,7 +369,7 @@ TEST_CASE("llama_loader: rejects missing, misshapen, and uncomputable tensors", 
     }
     {
         model_spec spec;
-        spec.tensors["blk.0.ffn_up.weight"] = {{n_embd, n_ff}, q5_0_tag};
+        spec.tensors["blk.0.ffn_up.weight"] = {{n_embd, n_ff}, q5_1_tag};
         require_error(spec, model_errc::unsupported_type, "blk.0.ffn_up.weight");
     }
     {
@@ -379,7 +379,7 @@ TEST_CASE("llama_loader: rejects missing, misshapen, and uncomputable tensors", 
     }
     {
         model_spec spec;
-        spec.tensors["rope_freqs.weight"] = {{32}, q5_0_tag};
+        spec.tensors["rope_freqs.weight"] = {{32}, q5_1_tag};
         require_error(spec, model_errc::unsupported_type, "rope_freqs.weight");
     }
 }
@@ -487,7 +487,7 @@ TEST_CASE("llama_loader: qwen2 reads its own keys and rejects what llama.cpp doe
     }
     {
         model_spec spec("qwen2");
-        spec.tensors["blk.0.attn_q.bias"] = {{n_head * head_dim}, q5_0_tag};  // whole Q5_0 blocks
+        spec.tensors["blk.0.attn_q.bias"] = {{n_head * head_dim}, q5_1_tag};  // whole Q5_1 blocks
         require_error(spec, model_errc::unsupported_type, "blk.0.attn_q.bias");
     }
     {
