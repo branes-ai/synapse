@@ -13,6 +13,8 @@
 /// format. The fused SIMD kernels of roadmap step 3 are tested against them.
 ///
 /// Q4_0  32 weights: x = d * (q - 8),           q in [0, 15]
+/// Q5_0  32 weights: x = d * (q - 16),          q in [0, 31]
+///      (4 low bits in qs, the 5th bit in qh)
 /// Q8_0  32 weights: x = d * q,                 q in [-128, 127]
 /// Q4_K 256 weights in 8 sub-blocks of 32: x = d*sc[j] * q - dmin*m[j],
 ///      q in [0, 15], sc/m 6-bit, packed into 12 bytes
@@ -36,6 +38,13 @@ struct block_q4_0 {
     std::uint8_t qs[qk_legacy / 2];  ///< nibbles: low = weights 0..15, high = 16..31
 };
 static_assert(sizeof(block_q4_0) == 18);
+
+struct block_q5_0 {
+    std::uint16_t d;                 ///< scale (binary16)
+    std::uint8_t qh[4];              ///< 5th bits: bit j belongs to weight j (little-endian uint32)
+    std::uint8_t qs[qk_legacy / 2];  ///< low nibbles: low = weights 0..15, high = 16..31
+};
+static_assert(sizeof(block_q5_0) == 22);
 
 struct block_q8_0 {
     std::uint16_t d;            ///< scale (binary16)
@@ -65,6 +74,24 @@ inline void dequantize(const block_q4_0& b, float* y) noexcept {
     for (std::size_t j = 0; j < qk_legacy / 2; ++j) {
         const int lo = (b.qs[j] & 0x0f) - 8;
         const int hi = (b.qs[j] >> 4) - 8;
+        y[j] = static_cast<float>(lo) * d;
+        y[j + qk_legacy / 2] = static_cast<float>(hi) * d;
+    }
+}
+
+/// The 32-bit high-bit mask of a Q5_0 block: bit j is the 5th bit of weight j.
+inline std::uint32_t q5_0_high_bits(const block_q5_0& b) noexcept {
+    return static_cast<std::uint32_t>(b.qh[0]) | static_cast<std::uint32_t>(b.qh[1]) << 8 |
+           static_cast<std::uint32_t>(b.qh[2]) << 16 | static_cast<std::uint32_t>(b.qh[3]) << 24;
+}
+
+/// Write the 32 weights of `b` to y[0..31].
+inline void dequantize(const block_q5_0& b, float* y) noexcept {
+    const float d = fp16_to_float(b.d);
+    const std::uint32_t qh = q5_0_high_bits(b);
+    for (std::size_t j = 0; j < qk_legacy / 2; ++j) {
+        const int lo = ((b.qs[j] & 0x0f) | static_cast<int>(((qh >> j) & 1) << 4)) - 16;
+        const int hi = ((b.qs[j] >> 4) | static_cast<int>(((qh >> (j + qk_legacy / 2)) & 1) << 4)) - 16;
         y[j] = static_cast<float>(lo) * d;
         y[j + qk_legacy / 2] = static_cast<float>(hi) * d;
     }

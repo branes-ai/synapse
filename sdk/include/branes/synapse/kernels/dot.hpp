@@ -9,6 +9,7 @@
 /// arithmetic follows ggml's ggml_vec_dot_*_q8_*_generic:
 ///
 ///   Q4_0 x Q8_0  sum (q - 8) a
+///   Q5_0 x Q8_0  sum (q - 16) a
 ///   Q8_0 x Q8_0  sum q a
 ///   Q4_K x Q8_K  sum_j sc_j dot(q_j, a_j) - dmin/d sum_j m_j sum(a_j)
 ///                (sub-block sums come from Q8_K's bsums)
@@ -105,6 +106,29 @@ struct block_kernel<quant::scheme<quant::tensor_type::q4_0>> {
         for (std::size_t j = 0; j < qk / 2; ++j) {
             w[j] = static_cast<std::int16_t>((b.qs[j] & 0x0f) - 8);
             w[j + qk / 2] = static_cast<std::int16_t>((b.qs[j] >> 4) - 8);
+        }
+        return {fp16_to_float(b.d)};
+    }
+    static float act_scale(act a, std::size_t i) noexcept {
+        return fp16_to_float(a.blocks[i].d);
+    }
+};
+
+/// Q5_0 weights . Q8_0 activations: sum (q - 16) a.
+template <>
+struct block_kernel<quant::scheme<quant::tensor_type::q5_0>> {
+    using act = activations<quant::block_q8_0>;
+    static constexpr std::size_t qk = quant::qk_legacy;
+    struct scales {
+        float d;
+    };
+    static scales unpack(const std::byte* row, std::size_t i, std::int16_t* w) noexcept {
+        const auto b = quant::detail::load_block<quant::block_q5_0>(row + i * sizeof(quant::block_q5_0));
+        const std::uint32_t qh = quant::q5_0_high_bits(b);
+        const auto hi_bit = [qh](std::size_t k) { return static_cast<int>((qh >> k) & 1) << 4; };
+        for (std::size_t j = 0; j < qk / 2; ++j) {
+            w[j] = static_cast<std::int16_t>(((b.qs[j] & 0x0f) | hi_bit(j)) - 16);
+            w[j + qk / 2] = static_cast<std::int16_t>(((b.qs[j] >> 4) | hi_bit(j + qk / 2)) - 16);
         }
         return {fp16_to_float(b.d)};
     }

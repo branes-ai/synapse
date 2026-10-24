@@ -50,7 +50,8 @@ std::vector<std::byte> random_matrix(std::size_t rows, std::size_t cols, std::mt
         std::memcpy(data.data() + block * S::type_size + offset, &h, sizeof h);
     };
     for (std::size_t i = 0; i < nblocks; ++i) {
-        if constexpr (S::type == tensor_type::q4_0 || S::type == tensor_type::q8_0 || S::type == tensor_type::f16) {
+        if constexpr (S::type == tensor_type::q4_0 || S::type == tensor_type::q5_0 || S::type == tensor_type::q8_0 ||
+                      S::type == tensor_type::f16) {
             put_scale(i, 0);  // d (or the value itself, for F16)
         } else if constexpr (S::type == tensor_type::q4_k) {
             put_scale(i, 0);  // d
@@ -139,6 +140,7 @@ int main(int argc, char** argv) {
     std::printf("fmt         fused                    dequantize + dot       speedup\n");
     std::mt19937 rng(42);
     bench<tensor_type::q4_0>("q4_0", rows, cols, reps, rng);
+    bench<tensor_type::q5_0>("q5_0", rows, cols, reps, rng);
     bench<tensor_type::q8_0>("q8_0", rows, cols, reps, rng);
     bench<tensor_type::q4_k>("q4_K", rows, cols, reps, rng);
     bench<tensor_type::q6_k>("q6_K", rows, cols, reps, rng);

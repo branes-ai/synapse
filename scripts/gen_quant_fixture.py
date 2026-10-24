@@ -7,7 +7,7 @@ For each format synapse decodes, the fixture holds an encoded tensor
 The C++ test loads the fixture through synapse's own GGUF parser and checks
 that its dequantizers reproduce `.expected`.
 
-  - Q4_0, Q8_0, BF16: random weights quantized by gguf-py (realistic data).
+  - Q4_0, Q5_0, Q8_0, BF16: random weights quantized by gguf-py (realistic data).
   - F16: random weights cast to binary16.
   - Q4_K, Q6_K: gguf-py has no quantizer for these, and any bit pattern is a
     valid block, so blocks are random bytes with finite fp16 super-block
@@ -66,6 +66,7 @@ def main() -> None:
         "f16": (np.float16, weights((ROWS, COLS)).astype(np.float16)),
         "bf16": (Q.BF16, quants.quantize(weights((ROWS, COLS)), Q.BF16)),
         "q4_0": (Q.Q4_0, quants.quantize(weights((ROWS, COLS)), Q.Q4_0)),
+        "q5_0": (Q.Q5_0, quants.quantize(weights((ROWS, COLS)), Q.Q5_0)),
         "q8_0": (Q.Q8_0, quants.quantize(weights((ROWS, COLS)), Q.Q8_0)),
         "q8_0.3d": (Q.Q8_0, quants.quantize(weights((2, 2, 64)), Q.Q8_0)),
         "q4_k": (Q.Q4_K, k_tensor(Q.Q4_K, [0, 2])),    # d, dmin at the block start

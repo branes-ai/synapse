@@ -126,6 +126,8 @@ struct scheme<tensor_type::bf16> {
 template <>
 struct scheme<tensor_type::q4_0> : detail::block_scheme<block_q4_0, tensor_type::q4_0, qk_legacy, block_q8_0> {};
 template <>
+struct scheme<tensor_type::q5_0> : detail::block_scheme<block_q5_0, tensor_type::q5_0, qk_legacy, block_q8_0> {};
+template <>
 struct scheme<tensor_type::q8_0> : detail::block_scheme<block_q8_0, tensor_type::q8_0, qk_legacy, block_q8_0> {};
 template <>
 struct scheme<tensor_type::q4_k> : detail::block_scheme<block_q4_k, tensor_type::q4_k, qk_k, block_q8_k> {};
@@ -161,6 +163,7 @@ static_assert(matches_tensor_type_traits<tensor_type::f32>());
 static_assert(matches_tensor_type_traits<tensor_type::f16>());
 static_assert(matches_tensor_type_traits<tensor_type::bf16>());
 static_assert(matches_tensor_type_traits<tensor_type::q4_0>());
+static_assert(matches_tensor_type_traits<tensor_type::q5_0>());
 static_assert(matches_tensor_type_traits<tensor_type::q8_0>());
 static_assert(matches_tensor_type_traits<tensor_type::q4_k>());
 static_assert(matches_tensor_type_traits<tensor_type::q6_k>());
