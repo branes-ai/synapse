@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/branes-ai/synapse/compare/v0.11.1...v0.12.0) (2026-10-24)
+
+
+### Features
+
+* support Q5_0 weights, enabling Qwen2.5-0.5B ([#46](https://github.com/branes-ai/synapse/issues/46)) ([f21405f](https://github.com/branes-ai/synapse/commit/f21405faa754e6011a0c3a880e6553e3a38c111d)), closes [#43](https://github.com/branes-ai/synapse/issues/43)
+
 ## [0.11.1](https://github.com/branes-ai/synapse/compare/v0.11.0...v0.11.1) (2026-10-23)
 
 
