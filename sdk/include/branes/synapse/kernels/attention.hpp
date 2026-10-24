@@ -26,6 +26,8 @@
 #include <branes/synapse/kernels/elementwise.hpp>
 #include <branes/synapse/numeric/half.hpp>
 
+#include <mtl/simd/algorithm.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cassert>
@@ -262,6 +264,52 @@ inline void attention(std::span<const float> q,
     kv_append(k, v, cache, pos);
     for (std::size_t g = 0; g < cache.n_kv_heads; ++g) {
         attend_group(q, cache, pos, n_heads, scale, out, scores.subspan(g * slot, slot), g);
+    }
+}
+
+/// One head of bidirectional self-attention over n positions, with float
+/// operands and no cache, as llama.cpp's vision encoders compute it without
+/// flash attention (ggml_mul_mat of K and Q, ggml_soft_max_ext with the
+/// scale, ggml_mul_mat of V and the probabilities): for every query position
+/// i in [i0, i1), out_i = softmax_j(scale * q_i . k_j) v_j over j = 0..n-1,
+/// on head h's head_dim elements of each row. It writes only those rows of
+/// head h of out, and scores, so heads and query ranges can run on different
+/// threads; each row's result does not depend on the range it is computed in.
+///   Pre: q, k, v, out hold n rows of row_size floats; h * head_dim + head_dim
+///        <= row_size; i0 <= i1 <= n; n >= 1; scores.size() >= n; out does not
+///        alias q, k, v or scores.
+inline void self_attend_head(std::span<const float> q,
+                             std::span<const float> k,
+                             std::span<const float> v,
+                             std::size_t n,
+                             std::size_t row_size,
+                             std::size_t head_dim,
+                             std::size_t h,
+                             std::size_t i0,
+                             std::size_t i1,
+                             float scale,
+                             std::span<float> out,
+                             std::span<float> scores) noexcept {
+    assert(n >= 1 && (h + 1) * head_dim <= row_size && i0 <= i1 && i1 <= n && scores.size() >= n);  // Pre
+    assert(q.size() >= n * row_size && k.size() >= n * row_size && v.size() >= n * row_size &&
+           out.size() >= n * row_size);
+    const std::size_t off = h * head_dim;
+    const std::span<float> s = scores.first(n);
+    for (std::size_t i = i0; i < i1; ++i) {
+        const float* qi = q.data() + i * row_size + off;
+        for (std::size_t j = 0; j < n; ++j) {
+            s[j] = mtl::simd::reduce_dot(qi, k.data() + j * row_size + off, head_dim) * scale;
+        }
+        softmax(s, s);  // in place
+        float* oi = out.data() + i * row_size + off;
+        std::fill_n(oi, head_dim, 0.0f);
+        for (std::size_t j = 0; j < n; ++j) {
+            const float p = s[j];
+            const float* vj = v.data() + j * row_size + off;
+            for (std::size_t d = 0; d < head_dim; ++d) {
+                oi[d] += p * vj[d];
+            }
+        }
     }
 }
 

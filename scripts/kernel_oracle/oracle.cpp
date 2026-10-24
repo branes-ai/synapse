@@ -10,7 +10,14 @@
 //
 // plus the shared float input `x`. synapse's tests check that its quantizers
 // reproduce .act bit for bit and that its gemv reproduces .y to float
-// re-association error. The file is written with ggml's gguf writer, so it
+// re-association error.
+//
+// It also runs two of ggml's CPU ops on their own:
+//
+//   gelu.x, gelu.y  ggml_gelu (the binary16-table GELU) of a sweep of inputs
+//                   across [-12, 12], including the +-10 cutoffs
+//   norm.x, norm.y  ggml_norm (LayerNorm without weight or bias, eps 1e-6)
+//                   of 4 rows of 768 floats The file is written with ggml's gguf writer, so it
 // also exercises synapse's parser on a ggml-produced image.
 
 #include "ggml-cpu.h"
@@ -89,6 +96,39 @@ int main(int argc, char** argv) {
         gguf_add_tensor(out, act);
         gguf_add_tensor(out, y);
         std::printf("%-5s vec_dot_type=%s y[0]=%g\n", fmt.c_str(), ggml_type_name(vt), static_cast<double>(ys[0]));
+    }
+
+    // ggml_gelu over a sweep of inputs, and ggml_norm over a few rows.
+    {
+        constexpr int64_t n_gelu = 4096;
+        ggml_tensor* gx = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_gelu);
+        ggml_set_name(gx, "gelu.x");
+        auto* g = static_cast<float*>(gx->data);
+        for (int64_t i = 0; i < n_gelu; ++i) {
+            g[i] = -12.0f + 24.0f * static_cast<float>(i) / static_cast<float>(n_gelu - 1);
+        }
+        g[0] = -10.0f;
+        g[1] = 10.0f;
+        g[2] = 0.0f;
+        constexpr int64_t rows_n = 4;
+        constexpr int64_t cols_n = 768;
+        ggml_tensor* nx = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, cols_n, rows_n);
+        ggml_set_name(nx, "norm.x");
+        auto* nv = static_cast<float*>(nx->data);
+        for (int64_t i = 0; i < rows_n * cols_n; ++i) {
+            nv[i] = 3.0f * normal(rng) + static_cast<float>(i / cols_n);  // a different mean per row
+        }
+        ggml_tensor* gy = ggml_gelu(ctx, gx);
+        ggml_set_name(gy, "gelu.y");
+        ggml_tensor* ny = ggml_norm(ctx, nx, 1e-6f);
+        ggml_set_name(ny, "norm.y");
+        ggml_cgraph* gf = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gf, gy);
+        ggml_build_forward_expand(gf, ny);
+        ggml_graph_compute_with_ctx(ctx, gf, 1);
+        for (ggml_tensor* t : {gx, gy, nx, ny}) {
+            gguf_add_tensor(out, t);
+        }
     }
 
     if (!gguf_write_to_file(out, argv[1], false)) {

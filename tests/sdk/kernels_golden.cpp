@@ -10,10 +10,15 @@
 //   - Accuracy: against the float reference dequantize(W) . x, the error must
 //     stay within the exact bound sum |w| |x - x^| that rounding x to the
 //     8-bit activations x^ allows.
+//
+// The fixture also holds ggml_gelu and ggml_norm outputs: gelu must match bit
+// for bit (both round through binary16), layer_norm to float re-association
+// (ggml sums the squared deviations in SIMD lanes before widening).
 
 #include <branes/synapse/gguf/mapped_file.hpp>
 #include <branes/synapse/gguf/reader.hpp>
 #include <branes/synapse/gguf/tensor_view.hpp>
+#include <branes/synapse/kernels/elementwise.hpp>
 #include <branes/synapse/kernels/gemv.hpp>
 
 #include <catch2/catch_test_macros.hpp>
@@ -148,4 +153,37 @@ TEST_CASE("kernels_golden: Q4_K matches ggml", "[kernels][golden]") {
 
 TEST_CASE("kernels_golden: Q6_K matches ggml", "[kernels][golden]") {
     check_format<quant::scheme<gguf::tensor_type::q6_k>>("q6_K");
+}
+
+TEST_CASE("kernels_golden: gelu matches ggml_gelu bit for bit", "[kernels][golden][vision]") {
+    const auto x = f32_tensor("gelu.x");
+    const auto y_ggml = f32_tensor("gelu.y");
+    REQUIRE(x.size() == y_ggml.size());
+    std::vector<float> y(x.size());
+    kernels::gelu(x, y);
+    std::size_t mismatches = 0;
+    for (std::size_t i = 0; i < y.size(); ++i) {
+        mismatches += std::memcmp(&y[i], &y_ggml[i], sizeof(float)) != 0 ? 1 : 0;
+    }
+    CHECK(mismatches == 0);
+}
+
+TEST_CASE("kernels_golden: layer_norm matches ggml_norm", "[kernels][golden][vision]") {
+    const auto* t = fixture().find_tensor("norm.x");
+    REQUIRE(t != nullptr);
+    const auto cols = static_cast<std::size_t>(t->ne[0]);
+    const auto x = f32_tensor("norm.x");
+    const auto y_ggml = f32_tensor("norm.y");
+    const std::vector<float> ones(cols, 1.0f);
+    std::vector<std::byte> bytes(cols * sizeof(float));
+    std::memcpy(bytes.data(), ones.data(), bytes.size());
+    const mtl::mat::block_matrix_view<quant::scheme<gguf::tensor_type::f32>> gamma(1, cols, bytes);
+    std::vector<float> y(cols);
+    for (std::size_t r = 0; r < x.size() / cols; ++r) {
+        kernels::layer_norm(std::span<const float>(x).subspan(r * cols, cols), gamma, 1e-6f, y);
+        for (std::size_t i = 0; i < cols; ++i) {
+            INFO("row " << r << " col " << i << ": synapse " << y[i] << ", ggml " << y_ggml[r * cols + i]);
+            CHECK(std::fabs(y[i] - y_ggml[r * cols + i]) <= 1e-6f * std::fmax(1.0f, std::fabs(y_ggml[r * cols + i])));
+        }
+    }
 }

@@ -1,6 +1,6 @@
 #pragma once
 /// @file graph.hpp
-/// @brief The compute graph of a decode step: tensors, operations, and a checked builder.
+/// @brief The compute graph of a decode step or an image encoder: tensors, operations, and a checked builder.
 ///
 /// A graph is a DAG of operations over float activation vectors. Weights are
 /// not tensors of the graph: they are bound into the operations as typed
@@ -18,23 +18,30 @@
 ///   tensor_desc
 ///     bytes   : size_t — storage the tensor needs in the arena
 ///     size    : size_t — float elements per row (0 for kernel scratch)
-///     batched : bool   — max_batch rows (one per token of a run) or 1 row
+///     batched : bool   — max_batch / row_div rows (one per token of a run) or 1 row
+///     row_div : size_t — 1, or s^2 below a pixel_shuffle by s
 ///     role    : input | intermediate | output | scratch
 ///
 ///   A graph is built for a max_batch (1 for decode only). A run processes
-///   n <= max_batch tokens: batched tensors use their first n rows, and
-///   op_last_row reduces a batched tensor to its row n-1, so a prefill
+///   n <= max_batch tokens: batched tensors use their first n / row_div rows,
+///   and op_last_row reduces a batched tensor to its row n-1, so a prefill
 ///   computes the final layers (e.g. the vocabulary projection) only once.
+///   An image encoder is a graph whose rows are an image's patches rather
+///   than tokens: it embeds nothing, and op_pixel_shuffle merges s x s
+///   patches into one row, which fixes the patch grid, so every run of such a
+///   graph processes exactly max_batch rows.
 ///
 ///   state_desc — a KV cache layer: max_ctx rows of n_kv_heads * head_dim
 ///     F16 keys and as many values
 ///
 ///   node = std::variant<op_matmul, op_add, op_add_bias, op_mul, op_silu,
 ///                       op_softmax, op_rms_norm, op_embed, op_rope,
-///                       op_attn_temperature, op_attention, op_last_row>
-///     each op names its operand and result tensors by tensor_id; op_matmul
-///     and op_attention also name a scratch tensor, and op_attention the
-///     state it reads and appends to
+///                       op_attn_temperature, op_attention, op_last_row,
+///                       op_layer_norm, op_gelu, op_add_rows,
+///                       op_self_attention, op_pixel_shuffle>
+///     each op names its operand and result tensors by tensor_id; op_matmul,
+///     op_attention and op_self_attention also name a scratch tensor, and
+///     op_attention the state it reads and appends to
 ///
 ///   compute_graph
 ///     tensors_ : vector<tensor_desc>
@@ -65,10 +72,16 @@
 ///   I7: every state is read and written by at most one attention node
 ///                                                   — constrains nodes_, states_
 ///   I8: an op's operands and result agree in batching: element-wise ops
-///       take operands that are both batched or both single-row (add_bias
-///       and rms_norm keep their operand's batching); embed, rope,
-///       attn_temperature and attention work on batched tensors; last_row turns a
-///       batched tensor into a single-row one
+///       take operands that are both batched or both single-row, with equal
+///       row_div (add_bias, rms_norm, layer_norm and matmul keep their
+///       operand's batching); embed, rope, attn_temperature, attention,
+///       add_rows, self_attention and pixel_shuffle work on batched tensors
+///       with row_div 1; last_row turns such a tensor into a single-row one
+///                                                   — constrains nodes_, tensors_
+///   I9: a pixel_shuffle by s over a grid_w x grid_h patch grid has
+///       grid_w * grid_h == max_batch, both divisible by s, and its result
+///       has row_div s^2; a graph with a pixel_shuffle has full_batch_only(),
+///       and its runs process exactly max_batch rows
 ///                                                   — constrains nodes_, tensors_
 ///
 /// The builder is no-throw on bad input: graphs are built from model
@@ -112,6 +125,11 @@ inline constexpr std::size_t plan_alignment = 64;
 /// the planner computes is at most this total, so with the bound at half of
 /// size_t no planner arithmetic can wrap.
 inline constexpr std::size_t max_graph_bytes = std::numeric_limits<std::size_t>::max() / 2;
+
+/// Query blocks each head of a self_attention is split into, so a few heads
+/// still spread over many threads; each (head, block) unit has its own slot
+/// of max_batch scores in the op's scratch.
+inline constexpr std::size_t self_attention_query_blocks = 4;
 
 /// The id the builder returns after an error; operations on it are no-ops.
 inline constexpr tensor_id invalid_tensor = std::numeric_limits<tensor_id>::max();
@@ -182,7 +200,8 @@ struct tensor_desc {
     std::size_t bytes = 0;
     std::size_t size = 0;  ///< float elements per row; 0 for scratch
     tensor_role role = tensor_role::intermediate;
-    bool batched = true;  ///< max_batch rows, or a single row
+    bool batched = true;      ///< max_batch / row_div rows, or a single row
+    std::size_t row_div = 1;  ///< batched rows per run row: 1, or s^2 below a pixel_shuffle (I9)
 };
 
 /// A KV cache layer, allocated by the session and kept across runs.
@@ -249,6 +268,32 @@ struct op_last_row {  ///< out = row n-1 of in (the last token of the run)
     tensor_id in, out;
 };
 
+struct op_layer_norm {  ///< out = (in - mean) / sqrt(var + eps) * gamma + beta
+    tensor_id in;
+    matrix_ref gamma;  ///< 1 x size
+    matrix_ref beta;   ///< 1 x size, or empty for no bias
+    float eps;
+    tensor_id out;
+};
+struct op_gelu {  ///< out = gelu(in), tanh approximation, through binary16 as ggml
+    tensor_id in, out;
+};
+struct op_add_rows {  ///< out row i = in row i + row i of table (learned position embeddings)
+    tensor_id in;
+    matrix_ref table;  ///< at least max_batch x size
+    tensor_id out;
+};
+struct op_self_attention {  ///< out = bidirectional attention of q over every row's (k, v)
+    tensor_id q, k, v, out, scratch;
+    std::size_t n_heads;
+    float scale;
+};
+struct op_pixel_shuffle {  ///< out = s x s blocks of in's patch grid, each merged into one row
+    tensor_id in, out;
+    std::size_t grid_w;  ///< patches per grid row
+    std::size_t scale;   ///< s
+};
+
 using node = std::variant<op_matmul,
                           op_add,
                           op_add_bias,
@@ -260,7 +305,12 @@ using node = std::variant<op_matmul,
                           op_rope,
                           op_attn_temperature,
                           op_attention,
-                          op_last_row>;
+                          op_last_row,
+                          op_layer_norm,
+                          op_gelu,
+                          op_add_rows,
+                          op_self_attention,
+                          op_pixel_shuffle>;
 
 /// Operand (read) tensors of a node.
 inline std::vector<tensor_id> operands(const node& n) {
@@ -301,6 +351,21 @@ inline std::vector<tensor_id> operands(const node& n) {
         std::vector<tensor_id> operator()(const op_last_row& o) const {
             return {o.in};
         }
+        std::vector<tensor_id> operator()(const op_layer_norm& o) const {
+            return {o.in};
+        }
+        std::vector<tensor_id> operator()(const op_gelu& o) const {
+            return {o.in};
+        }
+        std::vector<tensor_id> operator()(const op_add_rows& o) const {
+            return {o.in};
+        }
+        std::vector<tensor_id> operator()(const op_self_attention& o) const {
+            return {o.q, o.k, o.v};
+        }
+        std::vector<tensor_id> operator()(const op_pixel_shuffle& o) const {
+            return {o.in};
+        }
     };
     return std::visit(visitor{}, n);
 }
@@ -312,6 +377,9 @@ inline std::vector<tensor_id> results(const node& n) {
     }
     if (const auto* a = std::get_if<op_attention>(&n)) {
         return {a->out, a->scratch};
+    }
+    if (const auto* s = std::get_if<op_self_attention>(&n)) {
+        return {s->out, s->scratch};
     }
     return {std::visit([](const auto& o) { return o.out; }, n)};
 }
@@ -392,9 +460,18 @@ public:
     std::size_t max_batch() const noexcept {
         return max_batch_;
     }
-    /// Rows a tensor holds: max_batch() if batched, else 1.
+    /// True if every run must process exactly max_batch() rows: the graph
+    /// has a pixel_shuffle, whose patch grid is fixed (I9).
+    bool full_batch_only() const noexcept {
+        return full_batch_only_;
+    }
+    /// True if the graph has an embed node, so a run needs tokens.
+    bool embeds() const noexcept {
+        return embeds_;
+    }
+    /// Rows a tensor holds: max_batch() / row_div if batched, else 1.
     std::size_t rows(tensor_id t) const noexcept {
-        return tensors_[t].batched ? max_batch_ : 1;
+        return tensors_[t].batched ? max_batch_ / tensors_[t].row_div : 1;
     }
 
 private:
@@ -406,6 +483,8 @@ private:
     std::size_t token_limit_ = std::numeric_limits<std::size_t>::max();
     std::size_t position_limit_ = std::numeric_limits<std::size_t>::max();
     std::size_t max_batch_ = 1;
+    bool full_batch_only_ = false;
+    bool embeds_ = false;
     std::vector<node> nodes_;
     std::vector<tensor_id> inputs_;
     std::vector<tensor_id> outputs_;
@@ -483,7 +562,7 @@ public:
         if (!scratch_bytes) {
             return fail(graph_errc::too_large);
         }
-        const tensor_id out = add_floats(rows(w), tensor_role::intermediate, batched(x));
+        const tensor_id out = add_floats(rows(w), tensor_role::intermediate, batched(x), row_div(x));
         const tensor_id scratch = add_tensor(*scratch_bytes, 0, tensor_role::scratch, false);
         if (out == invalid_tensor || scratch == invalid_tensor) {
             return invalid_tensor;
@@ -508,7 +587,7 @@ public:
         if (rows(bias) != 1 || cols(bias) != size_of(x)) {
             return fail(graph_errc::size_mismatch);
         }
-        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x));
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x), row_div(x));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(op_add_bias{x, bias, out});
         }
@@ -529,7 +608,7 @@ public:
         if (rows(gamma) != 1 || cols(gamma) != size_of(x)) {
             return fail(graph_errc::size_mismatch);
         }
-        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x));
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x), row_div(x));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(op_rms_norm{x, gamma, eps, out});
         }
@@ -547,6 +626,7 @@ public:
         const tensor_id out = add_floats(cols(table), tensor_role::intermediate, true);
         if (out != invalid_tensor) {
             g_.token_limit_ = std::min(g_.token_limit_, rows(table));
+            g_.embeds_ = true;
             g_.nodes_.emplace_back(op_embed{table, out});
         }
         return out;
@@ -569,7 +649,7 @@ public:
             return invalid_tensor;
         }
         if (head_dim == 0 || head_dim % 2 != 0 || size_of(x) % head_dim != 0 ||
-            (!freq_factors.empty() && freq_factors.size() != head_dim / 2) || !batched(x)) {
+            (!freq_factors.empty() && freq_factors.size() != head_dim / 2) || !per_token(x)) {
             return fail(graph_errc::bad_shape);  // I6, I8
         }
         const auto positive = [](float f) { return std::isfinite(f) && f > 0.0f; };
@@ -599,7 +679,7 @@ public:
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
-        if (!batched(x)) {
+        if (!per_token(x)) {
             return fail(graph_errc::bad_shape);  // I8
         }
         if (!std::isfinite(scale) || floor_len == 0) {
@@ -654,8 +734,8 @@ public:
         const state_desc& c = g_.states_[cache];
         const std::size_t row = c.n_kv_heads * c.head_dim;
         if (n_heads == 0 || n_heads % c.n_kv_heads != 0 || n_heads > max_graph_bytes / c.head_dim ||
-            size_of(q) != n_heads * c.head_dim || size_of(k) != row || size_of(v) != row || !batched(q) ||
-            !batched(k) || !batched(v)) {
+            size_of(q) != n_heads * c.head_dim || size_of(k) != row || size_of(v) != row || !per_token(q) ||
+            !per_token(k) || !per_token(v)) {
             return fail(graph_errc::bad_shape);  // I6, I8
         }
         if (!std::isfinite(scale) || scale <= 0.0f) {
@@ -686,12 +766,117 @@ public:
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
-        if (!batched(x)) {
+        if (!per_token(x)) {
             return fail(graph_errc::bad_shape);  // I8
         }
         const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, false);
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(op_last_row{x, out});
+        }
+        return out;
+    }
+
+    /// (x - mean(x)) / sqrt(var(x) + eps) * gamma, plus beta unless beta is
+    /// the empty matrix.
+    ///   Pre (checked): gamma (and beta, if given) 1 x x.size; eps finite and
+    ///   non-negative. The result has x's batching (I8).
+    tensor_id layer_norm(tensor_id x, const matrix_ref& gamma, const matrix_ref& beta, float eps) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        const bool has_beta = !std::holds_alternative<std::monostate>(beta);
+        if (rows(gamma) != 1 || cols(gamma) != size_of(x) ||
+            (has_beta && (rows(beta) != 1 || cols(beta) != size_of(x)))) {
+            return fail(graph_errc::size_mismatch);
+        }
+        if (!std::isfinite(eps) || eps < 0.0f) {
+            return fail(graph_errc::bad_parameter);
+        }
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x), row_div(x));
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_layer_norm{x, gamma, beta, eps, out});
+        }
+        return out;
+    }
+
+    tensor_id gelu(tensor_id x) {
+        return unary<op_gelu>(x);
+    }
+
+    /// x with row i of table added to its row i, for every row of a run.
+    ///   Pre (checked): x batched with row_div 1 (I8); table has x.size
+    ///   columns and at least max_batch rows.
+    tensor_id add_rows(tensor_id x, const matrix_ref& table) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        if (!per_token(x)) {
+            return fail(graph_errc::bad_shape);  // I8
+        }
+        if (cols(table) != size_of(x) || rows(table) < g_.max_batch_) {
+            return fail(graph_errc::size_mismatch);
+        }
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, true);
+        if (out != invalid_tensor) {
+            g_.nodes_.emplace_back(op_add_rows{x, table, out});
+        }
+        return out;
+    }
+
+    /// Bidirectional attention over the run's rows: row i of the result is,
+    /// for each of n_heads heads, softmax_j(scale * q_i . k_j) v_j over every
+    /// row j. Nothing is cached between runs.
+    ///   Pre (checked): q, k, v batched with row_div 1 (I8) and of one size, a
+    ///   multiple of n_heads (I6); scale finite and positive.
+    tensor_id self_attention(tensor_id q, tensor_id k, tensor_id v, std::size_t n_heads, float scale) {
+        if (!operand_ok(q) || !operand_ok(k) || !operand_ok(v)) {
+            return invalid_tensor;
+        }
+        if (n_heads == 0 || size_of(q) % n_heads != 0 || size_of(k) != size_of(q) || size_of(v) != size_of(q) ||
+            !per_token(q) || !per_token(k) || !per_token(v)) {
+            return fail(graph_errc::bad_shape);  // I6, I8
+        }
+        if (!std::isfinite(scale) || scale <= 0.0f) {
+            return fail(graph_errc::bad_parameter);
+        }
+        // One max_batch slot of scores per (head, query block) unit, so the
+        // units run concurrently.
+        const std::size_t units = n_heads * self_attention_query_blocks;
+        if (n_heads > max_graph_bytes / self_attention_query_blocks ||
+            g_.max_batch_ > max_graph_bytes / sizeof(float) / units) {
+            return fail(graph_errc::too_large);
+        }
+        const tensor_id out = add_floats(size_of(q), tensor_role::intermediate, true);
+        const tensor_id scratch = add_tensor(units * g_.max_batch_ * sizeof(float), 0, tensor_role::scratch, false);
+        if (out == invalid_tensor || scratch == invalid_tensor) {
+            return invalid_tensor;
+        }
+        g_.nodes_.emplace_back(op_self_attention{q, k, v, out, scratch, n_heads, scale});
+        return out;
+    }
+
+    /// x's rows as a grid_w-wide patch grid, each s x s block of patches
+    /// merged into one row of s^2 * x.size floats, in llama.cpp's
+    /// build_patch_merge_permute order: block rows top to bottom, blocks left
+    /// to right, and within a block, patch (dx, dy) at offset (dy * s + dx) * x.size.
+    ///   Pre (checked): x batched with row_div 1 (I8); grid_w * grid_h ==
+    ///   max_batch with grid_w and grid_h multiples of s >= 2 (I9). The graph
+    ///   then accepts only runs of max_batch rows.
+    tensor_id pixel_shuffle(tensor_id x, std::size_t grid_w, std::size_t s) {
+        if (!operand_ok(x)) {
+            return invalid_tensor;
+        }
+        if (!per_token(x) || s < 2 || grid_w == 0 || g_.max_batch_ % grid_w != 0 || grid_w % s != 0 ||
+            (g_.max_batch_ / grid_w) % s != 0) {
+            return fail(graph_errc::bad_shape);  // I8, I9
+        }
+        if (size_of(x) > max_graph_bytes / (s * s)) {
+            return fail(graph_errc::too_large);
+        }
+        const tensor_id out = add_floats(size_of(x) * s * s, tensor_role::intermediate, true, s * s);
+        if (out != invalid_tensor) {
+            g_.full_batch_only_ = true;
+            g_.nodes_.emplace_back(op_pixel_shuffle{x, out, grid_w, s});
         }
         return out;
     }
@@ -753,18 +938,30 @@ private:
     bool batched(tensor_id t) const noexcept {
         return g_.tensors_[t].batched;
     }
+    std::size_t row_div(tensor_id t) const noexcept {
+        return g_.tensors_[t].row_div;
+    }
+    /// Batched with one row per run row: what per-token and per-patch ops take (I8).
+    bool per_token(tensor_id t) const noexcept {
+        return batched(t) && row_div(t) == 1;
+    }
 
-    /// Append a float tensor of `size` elements per row, max_batch rows if
-    /// batched. The only place a float tensor's byte count is computed, so
+    /// Append a float tensor of `size` elements per row, max_batch / div rows
+    /// if batched. The only place a float tensor's byte count is computed, so
     /// the multiplication is checked once for every op: sizes can come from
     /// untrusted metadata (an input) or from a weight view's row count, and
     /// max_batch from the caller, any of which can be large enough to wrap.
-    tensor_id add_floats(std::size_t size, tensor_role role, bool is_batched) {
-        const std::size_t n = is_batched ? g_.max_batch_ : 1;
+    ///   Pre: div divides max_batch (I9 for pixel_shuffle; 1 otherwise).
+    tensor_id add_floats(std::size_t size, tensor_role role, bool is_batched, std::size_t div = 1) {
+        const std::size_t n = is_batched ? g_.max_batch_ / div : 1;
         if (size > max_graph_bytes / sizeof(float) / n) {
             return fail(graph_errc::too_large);  // I5: n * size * sizeof(float) must not wrap
         }
-        return add_tensor(n * size * sizeof(float), size, role, is_batched);
+        const tensor_id t = add_tensor(n * size * sizeof(float), size, role, is_batched);
+        if (t != invalid_tensor) {
+            g_.tensors_[t].row_div = is_batched ? div : 1;
+        }
+        return t;
     }
 
     /// Append a tensor of `bytes` bytes, or fail with too_large if the graph
@@ -784,10 +981,10 @@ private:
         if (!operand_ok(a) || !operand_ok(b)) {
             return invalid_tensor;
         }
-        if (size_of(a) != size_of(b) || batched(a) != batched(b)) {
+        if (size_of(a) != size_of(b) || batched(a) != batched(b) || row_div(a) != row_div(b)) {
             return fail(graph_errc::size_mismatch);  // I2, I8
         }
-        const tensor_id out = add_floats(size_of(a), tensor_role::intermediate, batched(a));
+        const tensor_id out = add_floats(size_of(a), tensor_role::intermediate, batched(a), row_div(a));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(Op{a, b, out});
         }
@@ -799,7 +996,7 @@ private:
         if (!operand_ok(x)) {
             return invalid_tensor;
         }
-        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x));
+        const tensor_id out = add_floats(size_of(x), tensor_role::intermediate, batched(x), row_div(x));
         if (out != invalid_tensor) {
             g_.nodes_.emplace_back(Op{x, out});
         }
