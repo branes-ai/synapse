@@ -134,6 +134,10 @@ TEST_CASE("kernels_golden: Q4_0 matches ggml", "[kernels][golden]") {
     check_format<quant::scheme<gguf::tensor_type::q4_0>>("q4_0");
 }
 
+TEST_CASE("kernels_golden: Q5_0 matches ggml", "[kernels][golden]") {
+    check_format<quant::scheme<gguf::tensor_type::q5_0>>("q5_0");
+}
+
 TEST_CASE("kernels_golden: Q8_0 matches ggml", "[kernels][golden]") {
     check_format<quant::scheme<gguf::tensor_type::q8_0>>("q8_0");
 }

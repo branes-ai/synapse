@@ -180,6 +180,7 @@ TEST_CASE("kernels: plain-format gemv is an exact float matvec", "[kernels]") {
 
 TEST_CASE("kernels: mtl::mult on a synapse view is gemv bit for bit", "[kernels]") {
     check_mult_is_gemv<tensor_type::q4_0>(37, 512);
+    check_mult_is_gemv<tensor_type::q5_0>(37, 512);
     check_mult_is_gemv<tensor_type::q8_0>(37, 512);
     check_mult_is_gemv<tensor_type::q4_k>(19, 512);
     check_mult_is_gemv<tensor_type::q6_k>(19, 512);

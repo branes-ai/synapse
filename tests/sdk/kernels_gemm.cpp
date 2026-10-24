@@ -53,6 +53,7 @@ void check_gemm_equals_gemv(std::size_t rows, std::size_t cols) {
 
 TEST_CASE("kernels_gemm: each batch row equals gemv bit for bit (G1)", "[kernels][gemm]") {
     check_gemm_equals_gemv<tensor_type::q4_0>(37, 512);
+    check_gemm_equals_gemv<tensor_type::q5_0>(37, 512);
     check_gemm_equals_gemv<tensor_type::q8_0>(37, 512);
     check_gemm_equals_gemv<tensor_type::q4_k>(19, 512);
     check_gemm_equals_gemv<tensor_type::q6_k>(19, 512);

@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
     }
     gguf_add_tensor(out, x);
 
-    const ggml_type types[] = {GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K};
+    const ggml_type types[] = {GGML_TYPE_Q4_0, GGML_TYPE_Q5_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K};
     for (ggml_type type : types) {
         const std::string fmt = ggml_type_name(type);
 

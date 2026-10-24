@@ -54,6 +54,30 @@ TEST_CASE("quantized_view: Q4_0 decodes low nibbles then high nibbles", "[quant]
     }
 }
 
+TEST_CASE("quantized_view: Q5_0 takes weight j's 5th bit from bit j of qh", "[quant]") {
+    // Low nibbles ramp 0..15 in both halves; qh sets the 5th bit of the odd
+    // weights in the low half and of the even weights in the high half, so a
+    // misplaced bit shows as a wrong weight.
+    quant::block_q5_0 b{};
+    b.d = fp16_half;
+    for (std::size_t j = 0; j < 16; ++j) {
+        b.qs[j] = static_cast<std::uint8_t>(j | (j << 4));
+    }
+    const std::uint32_t qh = 0x5555AAAAu;
+    std::memcpy(b.qh, &qh, sizeof qh);  // little-endian, as ggml stores it
+    REQUIRE(quant::q5_0_high_bits(b) == qh);
+    std::array<float, 32> y{};
+    quant::dequantize(b, y.data());
+    for (std::size_t j = 0; j < 32; ++j) {
+        const auto q = static_cast<int>((j % 16) | (((qh >> j) & 1) << 4));
+        CHECK(y[j] == 0.5f * static_cast<float>(q - 16));
+    }
+    CHECK(y[0] == -8.0f);   // q = 0
+    CHECK(y[1] == 0.5f);    // q = 1 | 16 (bit 1 set)
+    CHECK(y[16] == 0.0f);   // q = 0 | 16 (bit 16 set)
+    CHECK(y[17] == -7.5f);  // q = 1 (bit 17 clear)
+}
+
 TEST_CASE("quantized_view: Q8_0 is scale times signed quant", "[quant]") {
     quant::block_q8_0 b{};
     b.d = fp16_half;
@@ -172,6 +196,8 @@ TEST_CASE("quantized_view: block_matrix_view rejects a shape its bytes do not ho
 TEST_CASE("quantized_view: scheme registry", "[quant]") {
     STATIC_REQUIRE(quant::has_scheme<tensor_type::q4_k>);
     STATIC_REQUIRE(quant::has_scheme<tensor_type::bf16>);
+    STATIC_REQUIRE(quant::has_scheme<tensor_type::q5_0>);
+    STATIC_REQUIRE_FALSE(quant::has_scheme<tensor_type::q5_1>);
     STATIC_REQUIRE_FALSE(quant::has_scheme<tensor_type::q5_k>);
     STATIC_REQUIRE_FALSE(quant::has_scheme<tensor_type::i32>);
     STATIC_REQUIRE(quant::Scheme<quant::scheme<tensor_type::q6_k>>);

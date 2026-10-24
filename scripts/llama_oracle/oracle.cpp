@@ -85,14 +85,15 @@ struct tiny_config {
     }
 };
 
-// K-quant rows need 256 columns.
+// K-quant rows need 256 columns. The token embedding (tied to the output) and
+// one projection are Q5_0, the fallback Qwen2.5-0.5B's Q4_K_M file uses for them.
 constexpr tiny_config quantized{
     256,
     512,
     512,
-    GGML_TYPE_Q6_K,
+    GGML_TYPE_Q5_0,
     {{GGML_TYPE_Q4_K, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_Q4_K, GGML_TYPE_Q4_K, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K},
-     {GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_F32, GGML_TYPE_Q4_K}}};
+     {GGML_TYPE_Q8_0, GGML_TYPE_Q4_0, GGML_TYPE_Q8_0, GGML_TYPE_Q5_0, GGML_TYPE_Q4_0, GGML_TYPE_F32, GGML_TYPE_Q4_K}}};
 
 constexpr layer_types all_f32{
     GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32, GGML_TYPE_F32};

@@ -39,7 +39,7 @@ struct random_matrix {
         };
         const std::size_t nblocks = r * c / scheme::block_size;
         for (std::size_t i = 0; i < nblocks; ++i) {
-            if constexpr (T == tensor_type::q4_0 || T == tensor_type::q8_0) {
+            if constexpr (T == tensor_type::q4_0 || T == tensor_type::q5_0 || T == tensor_type::q8_0) {
                 put_f16(i, 0, scale(rng));
             } else if constexpr (T == tensor_type::q4_k) {
                 put_f16(i, 0, scale(rng));
