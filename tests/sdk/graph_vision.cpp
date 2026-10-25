@@ -194,3 +194,32 @@ TEST_CASE("graph_vision: a session runs a patch graph only in full and without t
     session es{*eg};
     CHECK_FALSE(es.run_rows(1));
 }
+
+TEST_CASE("graph_vision: gelu over many rows does not depend on the thread count", "[graph][vision][session]") {
+    // 37 rows of 300: pieces of a multiple of 8 rows, and a short last one (D1).
+    constexpr std::size_t n = 37;
+    constexpr std::size_t size = 300;
+    graph_builder b(n);
+    const tensor_id x = b.input(size);
+    const tensor_id y = b.gelu(x);
+    b.output(y);
+    auto g = std::move(b).finalize();
+    REQUIRE(g);
+
+    std::mt19937 rng(5);
+    std::normal_distribution<float> normal(0.0f, 4.0f);
+    std::vector<float> in(n * size);
+    for (auto& v : in) {
+        v = normal(rng);
+    }
+    std::vector<float> want(in.size());
+    kernels::gelu(in, want);
+    for (unsigned threads : {1u, 3u, 8u}) {
+        INFO("threads = " << threads);
+        session s{*g, threads};
+        std::copy(in.begin(), in.end(), s.tensor(x).begin());
+        REQUIRE(s.run_rows(n));
+        const auto got = s.tensor(y);
+        CHECK(std::vector<float>(got.begin(), got.end()) == want);
+    }
+}

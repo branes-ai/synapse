@@ -80,6 +80,73 @@ TEST_CASE("kernels_vision: gelu passes through binary16 and cuts off at +-10", "
     }
 }
 
+TEST_CASE("kernels_vision: round_to_fp16 equals float_to_fp16 at every rounding boundary", "[kernels][vision][half]") {
+    // Each binary16 value, its float neighbours, and the floats on and either
+    // side of the halfway point to the next value: every place where rounding
+    // can go wrong. Plus the whole of [-2^-24, 2^-24] at float resolution
+    // around the subnormal cutoff, and infinities.
+    std::size_t mismatches = 0;
+    const auto check = [&](float f) { mismatches += kernels::detail::round_to_fp16(f) != float_to_fp16(f) ? 1 : 0; };
+    for (std::uint32_t bits = 0; bits <= 0xffff; ++bits) {
+        const float f = fp16_to_float(static_cast<std::uint16_t>(bits));
+        if (std::isnan(f)) {
+            continue;
+        }
+        const float next = fp16_to_float(static_cast<std::uint16_t>(bits + 1));
+        const float mid = std::isfinite(next) && !std::isnan(next) ? (f + next) / 2 : f;
+        for (float g : {f, mid}) {
+            check(g);
+            check(std::nextafter(g, 0.0f));
+            check(std::nextafter(g, std::copysign(INFINITY, g)));
+        }
+    }
+    for (float f = 0x1p-26f; f <= 0x1p-23f; f = std::nextafter(f, 1.0f)) {
+        check(f);
+        check(-f);
+    }
+    check(65520.0f);
+    check(std::nextafter(65520.0f, 0.0f));
+    check(INFINITY);
+    check(-INFINITY);
+    // NaNs keep their sign and top payload bits, quiet.
+    for (std::uint32_t bits : {0x7fc00000u, 0x7fc02000u, 0xffc02000u, 0x7f800001u, 0x7fffffffu, 0xff801000u}) {
+        check(std::bit_cast<float>(bits));
+    }
+    CHECK(mismatches == 0);
+}
+
+TEST_CASE("kernels_vision: gelu's table equals evaluating ggml_gelu_f32 per element", "[kernels][vision]") {
+    // Every binary16 value inside the cutoffs, and the floats either side of
+    // it, and NaNs, against the formula gelu evaluated before it had a table.
+    constexpr float coef_a = 0.044715f;
+    constexpr float sqrt_2_over_pi = 0.79788456080286535587989211986876f;
+    std::vector<float> x;
+    for (std::uint32_t bits = 0; bits <= 0xffff; ++bits) {
+        const float f = fp16_to_float(static_cast<std::uint16_t>(bits));
+        if (std::isfinite(f) && std::fabs(f) <= 10.0f) {
+            x.insert(x.end(), {f, std::nextafter(f, -11.0f), std::nextafter(f, 11.0f)});
+        }
+    }
+    for (std::uint32_t bits : {0x7fc00000u, 0x7fc02000u, 0xffc02000u, 0x7fffffffu}) {
+        x.push_back(std::bit_cast<float>(bits));
+    }
+    std::vector<float> y(x.size());
+    kernels::gelu(x, y);  // x.size() is not a multiple of the chunk
+    std::size_t mismatches = 0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        float want = x[i];
+        if (x[i] <= -10.0f) {
+            want = 0.0f;
+        } else if (!(x[i] >= 10.0f)) {  // NaN takes the formula, as it did
+            const float h = fp16_to_float(float_to_fp16(x[i]));
+            const float g = 0.5f * h * (1.0f + std::tanh(sqrt_2_over_pi * h * (1.0f + coef_a * h * h)));
+            want = fp16_to_float(float_to_fp16(g));
+        }
+        mismatches += std::bit_cast<std::uint32_t>(y[i]) != std::bit_cast<std::uint32_t>(want) ? 1 : 0;
+    }
+    CHECK(mismatches == 0);
+}
+
 namespace {
 
 // ggml's build_patch_merge_permute, emulated op by op on logical indices:
