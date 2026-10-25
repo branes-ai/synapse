@@ -13,6 +13,7 @@
 ///   copy(x, s.tensor(in));              // write the inputs
 ///   s.run({token, pos});                // one token; no allocation
 ///   s.run(batch{tokens, pos});          // up to max_batch tokens (prefill)
+///   s.run_rows(n);                      // n rows of a graph that embeds nothing (an encoder)
 ///   read(s.tensor(out));                // read the outputs
 ///
 /// Model
@@ -35,8 +36,11 @@
 /// run. A sequence is decoded by running positions 0, 1, 2, ... in order, one
 /// token or a batch at a time: attention at position p reads the cache rows
 /// earlier runs (and earlier tokens of the same batch) wrote. A run of n
-/// tokens uses the first n rows of each batched tensor; by G1 and the order
-/// of the per-row kernels, its results equal running the tokens one by one.
+/// tokens uses the first n rows of each batched tensor (n / row_div below a
+/// pixel_shuffle); by G1 and the order of the per-row kernels, its results
+/// equal running the tokens one by one, except across a self_attention or
+/// pixel_shuffle, which mix rows, so graphs with a pixel_shuffle accept only
+/// full runs (I9).
 
 #include <branes/synapse/graph/graph.hpp>
 #include <branes/synapse/graph/planner.hpp>
@@ -130,13 +134,14 @@ public:
     }
 
     /// Execute every node in order for the tokens of b.  Returns false, and
-    /// runs nothing, unless 1 <= n <= max_batch(), pos + n <= position_limit()
-    /// and every token < token_limit() (n = b.tokens.size()).
+    /// runs nothing, unless 1 <= n <= max_batch() (n == max_batch() if
+    /// full_batch_only(), I9), pos + n <= position_limit() and every token <
+    /// token_limit() (n = b.tokens.size()).
     ///   Pre: the inputs' first n rows have been written; positions
     ///   0..b.pos-1 of the current sequence have been run.
     [[nodiscard]] bool run(batch b) noexcept {
         const std::size_t n = b.tokens.size();
-        if (n == 0 || n > graph_->max_batch() || std::size_t{b.pos} + n > graph_->position_limit()) {
+        if (!accepts(n, b.pos)) {
             return false;
         }
         for (std::uint32_t t : b.tokens) {
@@ -145,13 +150,38 @@ public:
             }
         }
         batch_ = b;
-        for (const node& nd : graph_->nodes()) {
-            std::visit([this](const auto& op) { execute(op); }, nd);
+        execute_all(n);
+        return true;
+    }
+
+    /// Execute every node in order for n rows at position 0, for a graph that
+    /// embeds nothing (an image encoder, whose rows are patches). Returns
+    /// false, and runs nothing, if the graph embeds, or unless 1 <= n <=
+    /// max_batch() (n == max_batch() if full_batch_only()) and n <=
+    /// position_limit().
+    ///   Pre: the inputs' first n rows have been written.
+    [[nodiscard]] bool run_rows(std::size_t n) noexcept {
+        if (graph_->embeds() || !accepts(n, 0)) {
+            return false;
         }
+        batch_ = batch{{}, 0};
+        execute_all(n);
         return true;
     }
 
 private:
+    bool accepts(std::size_t n, std::uint32_t pos) const noexcept {
+        return n != 0 && n <= graph_->max_batch() && (!graph_->full_batch_only() || n == graph_->max_batch()) &&
+               std::size_t{pos} + n <= graph_->position_limit();
+    }
+
+    void execute_all(std::size_t n) noexcept {
+        n_ = n;
+        for (const node& nd : graph_->nodes()) {
+            std::visit([this](const auto& op) { execute(op); }, nd);
+        }
+    }
+
     struct arena_deleter {
         void operator()(std::byte* p) const noexcept {
             ::operator delete[](p, std::align_val_t{plan_alignment});
@@ -190,9 +220,10 @@ private:
         return {arena_.get() + plan_.offset[t], graph_->tensors()[t].bytes};
     }
 
-    /// Rows of t this run uses: n if batched, else 1.
+    /// Rows of t this run uses: n / row_div if batched, else 1.
     std::size_t rows(tensor_id t) const noexcept {
-        return graph_->tensors()[t].batched ? batch_.tokens.size() : 1;
+        const tensor_desc& d = graph_->tensors()[t];
+        return d.batched ? n_ / d.row_div : 1;
     }
     /// The rows of t this run uses.
     std::span<float> active(tensor_id t) noexcept {
@@ -282,19 +313,19 @@ private:
         }
     }
     void execute(const op_embed& o) noexcept {
-        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+        for (std::size_t i = 0; i < n_; ++i) {
             const std::span<float> out = row(o.out, i);
             visit_view(o.table, [&](const auto& t) { t.decode_row(batch_.tokens[i], out.data()); });
         }
     }
     void execute(const op_rope& o) noexcept {
-        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+        for (std::size_t i = 0; i < n_; ++i) {
             kernels::rope(
                 row(o.in, i), row(o.out, i), o.head_dim, position(i), o.theta_scale, o.freq_factors, o.mode, o.scaling);
         }
     }
     void execute(const op_attn_temperature& o) noexcept {
-        for (std::size_t i = 0; i < batch_.tokens.size(); ++i) {
+        for (std::size_t i = 0; i < n_; ++i) {
             kernels::scale(row(o.in, i), kernels::attn_temperature(position(i), o.scale, o.floor_len), row(o.out, i));
         }
     }
@@ -303,7 +334,7 @@ private:
         // pos+i, so this is what running the tokens one by one would see.
         // Then the KV groups, each over all tokens with its own scratch slot.
         const kernels::kv_layer c = cache(o.cache);
-        const std::size_t n = batch_.tokens.size();
+        const std::size_t n = n_;
         for (std::size_t i = 0; i < n; ++i) {
             kernels::kv_append(row(o.k, i), row(o.v, i), c, position(i));
         }
@@ -326,8 +357,67 @@ private:
         });
     }
     void execute(const op_last_row& o) noexcept {
-        const std::span<const float> last = row(o.in, batch_.tokens.size() - 1);
+        const std::span<const float> last = row(o.in, n_ - 1);
         std::copy(last.begin(), last.end(), tensor(o.out).begin());
+    }
+
+    void execute(const op_layer_norm& o) noexcept {
+        for (std::size_t i = 0; i < rows(o.in); ++i) {
+            const std::span<const float> in = row(o.in, i);
+            const std::span<float> out = row(o.out, i);
+            visit_view(o.gamma, [&](const auto& g) {
+                if (std::holds_alternative<std::monostate>(o.beta)) {
+                    kernels::layer_norm(in, g, o.eps, out);
+                } else {
+                    visit_view(o.beta, [&](const auto& b) { kernels::layer_norm(in, g, b, o.eps, out); });
+                }
+            });
+        }
+    }
+    void execute(const op_gelu& o) noexcept {
+        kernels::gelu(active(o.in), active(o.out));
+    }
+    void execute(const op_add_rows& o) noexcept {
+        for (std::size_t i = 0; i < n_; ++i) {
+            const std::span<const float> in = row(o.in, i);
+            const std::span<float> out = row(o.out, i);
+            visit_view(o.table, [&](const auto& t) { t.decode_row(i, out.data()); });
+            kernels::add(in, out, out);
+        }
+    }
+    void execute(const op_self_attention& o) noexcept {
+        const std::size_t size = graph_->tensors()[o.q].size;
+        const std::size_t head_dim = size / o.n_heads;
+        const std::span<std::byte> scratch = bytes(o.scratch);
+        const std::span<float> scores{reinterpret_cast<float*>(scratch.data()), scratch.size() / sizeof(float)};
+        const std::size_t slot = graph_->max_batch();
+        // Work units are (head, block of queries); a unit's scores live in its
+        // slot. Every row's result is independent of the split (D1).
+        const std::size_t blocks = self_attention_query_blocks;
+        const std::size_t per_block = (n_ + blocks - 1) / blocks;
+        parallel(o.n_heads * blocks, 1, [&](std::size_t u0, std::size_t u1) {
+            for (std::size_t u = u0; u < u1; ++u) {
+                const std::size_t h = u / blocks;
+                const std::size_t i0 = std::min(n_, (u % blocks) * per_block);
+                const std::size_t i1 = std::min(n_, i0 + per_block);
+                kernels::self_attend_head(active(o.q),
+                                          active(o.k),
+                                          active(o.v),
+                                          n_,
+                                          size,
+                                          head_dim,
+                                          h,
+                                          i0,
+                                          i1,
+                                          o.scale,
+                                          active(o.out),
+                                          scores.subspan(u * slot, slot));
+            }
+        });
+    }
+    void execute(const op_pixel_shuffle& o) noexcept {
+        kernels::pixel_shuffle(
+            active(o.in), graph_->tensors()[o.in].size, o.grid_w, n_ / o.grid_w, o.scale, active(o.out));
     }
 
     std::uint32_t position(std::size_t i) const noexcept {
@@ -341,6 +431,7 @@ private:
     arena_ptr states_;
     unsigned threads_ = 1;
     batch batch_{};
+    std::size_t n_ = 0;  ///< rows of the current run
 };
 
 }  // namespace branes::synapse::graph

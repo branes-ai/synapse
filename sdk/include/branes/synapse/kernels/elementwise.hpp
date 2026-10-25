@@ -4,9 +4,11 @@
 ///
 /// All kernels take float spans, never allocate, and never throw. Outputs may
 /// not alias inputs (the memory planner guarantees this), except where noted. Numerics follow
-/// ggml's CPU ops: rms_norm accumulates the sum of squares in double, and
-/// softmax subtracts the maximum before exponentiating.
+/// ggml's CPU ops: rms_norm and layer_norm accumulate in double, softmax
+/// subtracts the maximum before exponentiating, and gelu goes through binary16
+/// as ggml's lookup table does.
 
+#include <branes/synapse/numeric/half.hpp>
 #include <branes/synapse/quant/scheme.hpp>
 
 #include <mtl/mat/block_matrix_view.hpp>
@@ -21,7 +23,7 @@
 
 namespace branes::synapse::kernels {
 
-/// out = a + b.  Pre: equal sizes.
+/// out = a + b.  Pre: equal sizes.  out may alias a or b.
 inline void add(std::span<const float> a, std::span<const float> b, std::span<float> out) noexcept {
     assert(a.size() == b.size() && a.size() == out.size());  // Pre
     for (std::size_t i = 0; i < out.size(); ++i) {
@@ -76,6 +78,28 @@ inline void silu(std::span<const float> x, std::span<float> out) noexcept {
     }
 }
 
+/// out = gelu(x) with the tanh approximation, computed as ggml's CPU
+/// ggml_vec_gelu_f32 does: x <= -10 gives 0, x >= 10 gives x, and otherwise x
+/// is rounded to binary16 and the result is ggml_gelu_f32 of that half,
+/// rounded to binary16 (ggml reads it from a 65536-entry table built so).
+///   Pre: equal sizes.
+inline void gelu(std::span<const float> x, std::span<float> out) noexcept {
+    assert(x.size() == out.size());  // Pre
+    constexpr float coef_a = 0.044715f;
+    constexpr float sqrt_2_over_pi = 0.79788456080286535587989211986876f;
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        if (x[i] <= -10.0f) {
+            out[i] = 0.0f;
+        } else if (x[i] >= 10.0f) {
+            out[i] = x[i];
+        } else {
+            const float h = fp16_to_float(float_to_fp16(x[i]));
+            const float g = 0.5f * h * (1.0f + std::tanh(sqrt_2_over_pi * h * (1.0f + coef_a * h * h)));
+            out[i] = fp16_to_float(float_to_fp16(g));
+        }
+    }
+}
+
 /// out = softmax(x).  Pre: equal, non-zero sizes.  May run in place (out == x).
 inline void softmax(std::span<const float> x, std::span<float> out) noexcept {
     assert(x.size() == out.size() && !x.empty());  // Pre
@@ -118,6 +142,107 @@ void rms_norm(std::span<const float> x,
         }
         for (std::size_t j = 0; j < len; ++j) {
             out[i + j] = (x[i + j] * scale) * gbuf[j];
+        }
+    }
+}
+
+namespace detail {
+
+/// Decode elements [i, i + len) of the 1 x n weight row w into buf.
+///   Pre: i and len are multiples of S::block_size (any multiple of 256 is,
+///   and so is a row's tail); len <= buf.size().
+template <quant::Scheme S>
+void decode_span(const mtl::mat::block_matrix_view<S>& w, std::size_t i, std::size_t len, float* buf) noexcept {
+    const std::span<const std::byte> row = w.row(0);
+    for (std::size_t j = 0; j < len; j += S::block_size) {
+        S::dequantize(row.data() + (i + j) / S::block_size * S::type_size, buf + j);
+    }
+}
+
+inline constexpr std::size_t norm_chunk = 256;
+
+}  // namespace detail
+
+/// out = (x - mean(x)) / sqrt(var(x) + eps) * gamma, as llama.cpp's ggml_norm
+/// followed by the multiply by its weight: the sum and the sum of squared
+/// deviations in double, the mean and the variance rounded to float. gamma
+/// is a 1 x n weight row in any decodable scheme (usually F32).
+///   Pre: x.size() == out.size() == gamma.num_cols(), gamma.num_rows() == 1,
+///        x non-empty; out does not alias x.
+template <quant::Scheme G>
+void layer_norm(std::span<const float> x,
+                const mtl::mat::block_matrix_view<G>& gamma,
+                float eps,
+                std::span<float> out) noexcept {
+    assert(gamma.num_rows() == 1 && x.size() == gamma.num_cols() && x.size() == out.size() && !x.empty());  // Pre
+    double sum = 0.0;
+    for (float v : x) {
+        sum += static_cast<double>(v);
+    }
+    const float mean = static_cast<float>(sum) / static_cast<float>(x.size());
+    double sq = 0.0;
+    for (std::size_t i = 0; i < x.size(); ++i) {
+        out[i] = x[i] - mean;
+        sq += static_cast<double>(out[i] * out[i]);
+    }
+    const auto variance = static_cast<float>(sq / static_cast<double>(x.size()));
+    const float scale = 1.0f / std::sqrt(variance + eps);
+
+    std::array<float, detail::norm_chunk> buf{};
+    for (std::size_t i = 0; i < x.size(); i += detail::norm_chunk) {
+        const std::size_t len = std::min(detail::norm_chunk, x.size() - i);
+        detail::decode_span(gamma, i, len, buf.data());
+        for (std::size_t j = 0; j < len; ++j) {
+            out[i + j] = (out[i + j] * scale) * buf[j];
+        }
+    }
+}
+
+/// layer_norm(x, gamma, eps, out) followed by the add of the 1 x n bias row
+/// beta, as ggml_norm, ggml_mul and ggml_add compute a LayerNorm with bias.
+///   Pre: as above, and beta.num_rows() == 1, beta.num_cols() == x.size().
+template <quant::Scheme G, quant::Scheme B>
+void layer_norm(std::span<const float> x,
+                const mtl::mat::block_matrix_view<G>& gamma,
+                const mtl::mat::block_matrix_view<B>& beta,
+                float eps,
+                std::span<float> out) noexcept {
+    assert(beta.num_rows() == 1 && beta.num_cols() == x.size());  // Pre
+    layer_norm(x, gamma, eps, out);
+    std::array<float, detail::norm_chunk> buf{};
+    for (std::size_t i = 0; i < x.size(); i += detail::norm_chunk) {
+        const std::size_t len = std::min(detail::norm_chunk, x.size() - i);
+        detail::decode_span(beta, i, len, buf.data());
+        for (std::size_t j = 0; j < len; ++j) {
+            out[i + j] = out[i + j] + buf[j];
+        }
+    }
+}
+
+/// Merge each s x s block of a grid_w x grid_h grid of patch rows (n floats
+/// each, patch x + grid_w * y) into one row of s^2 * n floats, as llama.cpp's
+/// build_patch_merge_permute: out row bx + (grid_w / s) * by holds patch
+/// (bx * s + dx, by * s + dy) at offset (dy * s + dx) * n.
+///   Pre: grid_w and grid_h multiples of s >= 1; in.size() == grid_w * grid_h * n
+///        == out.size(); out does not alias in.
+inline void pixel_shuffle(std::span<const float> in,
+                          std::size_t n,
+                          std::size_t grid_w,
+                          std::size_t grid_h,
+                          std::size_t s,
+                          std::span<float> out) noexcept {
+    assert(s >= 1 && grid_w % s == 0 && grid_h % s == 0);  // Pre
+    assert(in.size() == grid_w * grid_h * n && out.size() == in.size());
+    const std::size_t bw = grid_w / s;
+    for (std::size_t by = 0; by < grid_h / s; ++by) {
+        for (std::size_t bx = 0; bx < bw; ++bx) {
+            float* dst = out.data() + (bx + bw * by) * s * s * n;
+            for (std::size_t dy = 0; dy < s; ++dy) {
+                for (std::size_t dx = 0; dx < s; ++dx) {
+                    const float* src = in.data() + ((bx * s + dx) + grid_w * (by * s + dy)) * n;
+                    std::copy_n(src, n, dst + (dy * s + dx) * n);
+                }
+            }
         }
     }
 }
