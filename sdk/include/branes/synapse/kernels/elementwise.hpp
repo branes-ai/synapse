@@ -86,7 +86,8 @@ namespace detail {
 /// library). Scaling |f| by 2^112 and then 2^-110 sends what overflows to
 /// infinity; adding a power of two at the binary16 exponent of f leaves
 /// exactly the bits binary16 keeps, rounded by the float add. It equals
-/// float_to_fp16 for every non-NaN float, and loops of it vectorize.
+/// float_to_fp16 for every float, NaN payloads included, and loops of it
+/// vectorize.
 ///   Pre: the default floating-point environment (round to nearest, no
 ///   flush-to-zero).
 inline std::uint16_t round_to_fp16(float f) noexcept {
@@ -102,9 +103,12 @@ inline std::uint16_t round_to_fp16(float f) noexcept {
     const std::uint32_t exp_bits = (bits >> 13) & 0x00007c00u;
     const std::uint32_t mantissa_bits = bits & 0x00000fffu;
     const std::uint32_t nonsign = exp_bits + mantissa_bits;
-    // NaN as a mask, not a ?: between the two results, which GCC will not vectorize.
+    // NaN keeps its top payload bits, quiet, as float_to_fp16 does (ggml's
+    // fallback returns 0x7e00 instead). A mask, not a ?: between the two
+    // results, which GCC will not vectorize.
     const std::uint32_t nan = 0u - static_cast<std::uint32_t>(shl1_w > 0xff000000u);
-    return static_cast<std::uint16_t>((sign >> 16) | (nonsign & ~nan) | (0x7e00u & nan));
+    const std::uint32_t nan_bits = 0x7e00u | ((w >> 13) & 0x3ffu);
+    return static_cast<std::uint16_t>((sign >> 16) | (nonsign & ~nan) | (nan_bits & nan));
 }
 
 /// ggml_gelu_f32 of every binary16 value h, rounded to binary16 and widened
