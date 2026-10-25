@@ -281,6 +281,8 @@ private:
     static constexpr std::size_t matmul_grain = 16;
     /// Activation rows per thread below which splitting their quantization does not pay.
     static constexpr std::size_t prepare_grain = 8;
+    /// Rows per thread below which splitting an element-wise op does not pay.
+    static constexpr std::size_t elementwise_grain = 8;
 
     void execute(const op_matmul& o) noexcept {
         const std::span<std::byte> scratch = bytes(o.scratch);
@@ -389,7 +391,12 @@ private:
         }
     }
     void execute(const op_gelu& o) noexcept {
-        kernels::gelu(active(o.in), active(o.out));
+        const std::size_t size = graph_->tensors()[o.in].size;
+        const std::span<const float> in = active(o.in);
+        const std::span<float> out = active(o.out);
+        parallel(rows(o.in), elementwise_grain, [&](std::size_t r0, std::size_t r1) {
+            kernels::gelu(in.subspan(r0 * size, (r1 - r0) * size), out.subspan(r0 * size, (r1 - r0) * size));
+        });
     }
     void execute(const op_add_rows& o) noexcept {
         for (std::size_t i = 0; i < n_; ++i) {
