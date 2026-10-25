@@ -57,6 +57,13 @@ constexpr std::size_t wide_offset(std::size_t cols) noexcept {
     return (blocks + alignof(std::int16_t) - 1) / alignof(std::int16_t) * alignof(std::int16_t);
 }
 
+/// Byte offset of the decoded Q8_0 block scales: after the widened quants,
+/// rounded up to float alignment.
+constexpr std::size_t q8_0_scale_offset(std::size_t cols) noexcept {
+    const std::size_t end = wide_offset<quant::block_q8_0>(cols) + cols * sizeof(std::int16_t);
+    return (end + alignof(float) - 1) / alignof(float) * alignof(float);
+}
+
 /// Quantize x into the activation format A in scratch (the blocks, then
 /// their quants widened to int16), or use x itself for float activations.
 ///   Pre: scratch holds gemv_scratch_bytes for x.size() columns, aligned to
@@ -97,7 +104,13 @@ activations<A> prepare_activations(std::span<const float> x, std::span<std::byte
             }
             return {blocks, wide, bsums};
         } else {
-            return {blocks, wide};
+            // The block scales decoded from binary16 once here, not once per
+            // weight row in the dot.
+            float* d = ::new (static_cast<void*>(scratch.data() + q8_0_scale_offset(x.size()))) float[nb];
+            for (std::size_t i = 0; i < nb; ++i) {
+                d[i] = fp16_to_float(blocks[i].d);
+            }
+            return {blocks, wide, d};
         }
     }
 }
@@ -105,8 +118,9 @@ activations<A> prepare_activations(std::span<const float> x, std::span<std::byte
 }  // namespace detail
 
 /// Scratch bytes gemv needs for a matrix of scheme S with `cols` columns:
-/// the quantized activation blocks followed by their quants widened to int16
-/// (0 for plain formats, whose activations stay float).
+/// the quantized activation blocks followed by their quants widened to int16,
+/// then Q8_K's sub-block sums or Q8_0's decoded block scales (0 for plain
+/// formats, whose activations stay float).
 ///   Pre: cols % S::block_size == 0.
 template <quant::Scheme S>
 constexpr std::size_t gemv_scratch_bytes(std::size_t cols) noexcept {
@@ -118,7 +132,7 @@ constexpr std::size_t gemv_scratch_bytes(std::size_t cols) noexcept {
         if constexpr (std::is_same_v<A, quant::block_q8_k>) {
             return bytes + cols / quant::qk_k * sizeof(quant::block_q8_k::bsums);  // contiguous bsums
         } else {
-            return bytes;
+            return detail::q8_0_scale_offset(cols) + cols / quant::qk_legacy * sizeof(float);  // decoded scales
         }
     }
 }
@@ -130,7 +144,7 @@ constexpr std::size_t gemv_scratch_bytes(std::size_t cols) noexcept {
 ///         aligned to gemv_scratch_alignment; x and y do not overlap scratch.
 ///   Post: y[r] == row_dot(row r of w, activations(x)) for every r; scratch
 ///         holds the quantized activation blocks (ggml's Q8_0 / Q8_K layout)
-///         followed by their int16-widened quants.
+///         followed by their int16-widened quants (and the extras above).
 template <quant::Scheme S>
 void gemv(const mtl::mat::block_matrix_view<S>& w,
           std::span<const float> x,

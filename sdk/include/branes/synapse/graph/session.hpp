@@ -51,6 +51,7 @@
 #include <mtl/detail/thread_pool.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -243,33 +244,43 @@ private:
         return requested == 0 ? pool : std::min(requested, pool);
     }
 
-    /// body(begin, end) over contiguous chunks of [0, n), each at least
-    /// `grain` long, on up to threads_ threads of MTL5's pool (the calling
-    /// thread takes the first chunk). Returns when every chunk is done, which
-    /// orders all of their writes before the caller's next read (P2). The
-    /// chunks only partition the work: each output is produced by one body
-    /// call whatever the split (D1).
+    /// Pieces per thread parallel() cuts its range into. The threads take
+    /// pieces as they finish, so a slower core (an E-core, or a hyperthread
+    /// sharing its core) takes fewer, rather than holding up the whole team.
+    static constexpr std::size_t pieces_per_thread = 4;
+
+    /// body(begin, end) over contiguous pieces of [0, n), each a multiple of
+    /// `grain` long (but the last), on up to threads_ threads of MTL5's pool,
+    /// which take the next piece as they finish one. Returns when every piece
+    /// is done, which orders all of their writes before the caller's next
+    /// read (P2). The pieces only partition the work: each output is produced
+    /// by one body call whatever the split or the thread (D1).
     template <typename Body>
     void parallel(std::size_t n, std::size_t grain, Body&& body) noexcept {
-        std::size_t team = threads_;
-        if (grain > 0) {
-            team = std::min(team, n / grain);
-        }
+        grain = std::max<std::size_t>(grain, 1);
+        const std::size_t team = std::min<std::size_t>(threads_, n / grain);
         if (team <= 1) {
             body(std::size_t{0}, n);
             return;
         }
-        const std::size_t chunk = (n + team - 1) / team;
-        mtl::detail::thread_pool::instance().run(static_cast<unsigned>(team), [&](unsigned tid) {
-            const std::size_t begin = std::size_t{tid} * chunk;
-            if (begin < n) {
-                body(begin, std::min(n, begin + chunk));
+        const std::size_t pieces = std::min(n / grain, team * pieces_per_thread);
+        const std::size_t step = ((n + pieces - 1) / pieces + grain - 1) / grain * grain;
+        std::atomic<std::size_t> next{0};
+        mtl::detail::thread_pool::instance().run(static_cast<unsigned>(team), [&](unsigned) {
+            for (;;) {
+                const std::size_t begin = next.fetch_add(1, std::memory_order_relaxed) * step;
+                if (begin >= n) {
+                    return;
+                }
+                body(begin, std::min(n, begin + step));
             }
         });
     }
 
     /// Weight rows per thread below which splitting a matmul does not pay.
     static constexpr std::size_t matmul_grain = 16;
+    /// Activation rows per thread below which splitting their quantization does not pay.
+    static constexpr std::size_t prepare_grain = 8;
 
     void execute(const op_matmul& o) noexcept {
         const std::span<std::byte> scratch = bytes(o.scratch);
@@ -278,7 +289,10 @@ private:
         visit_view(o.w, [&](const auto& w) {
             using S = typename std::decay_t<decltype(w)>::scheme_type;
             // Quantize the activations once, then split the weight rows.
-            const auto* acts = kernels::gemm_prepare<S>(w.num_cols(), active(o.in), n, scratch);
+            auto* const acts = kernels::gemm_activations<S>(w.num_cols(), n, scratch);
+            parallel(n, prepare_grain, [&](std::size_t t0, std::size_t t1) {
+                kernels::gemm_prepare_rows<S>(w.num_cols(), active(o.in), scratch, acts, t0, t1);
+            });
             parallel(w.num_rows(), matmul_grain, [&](std::size_t r0, std::size_t r1) {
                 kernels::gemm_rows(w, acts, n, y, r0, r1);
             });
