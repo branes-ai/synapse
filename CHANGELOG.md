@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.1](https://github.com/branes-ai/synapse/compare/v0.13.0...v0.13.1) (2026-10-25)
+
+
+### Performance
+
+* register-blocked quantized gemm and dynamic thread scheduling ([#51](https://github.com/branes-ai/synapse/issues/51)) ([f6dc7f4](https://github.com/branes-ai/synapse/commit/f6dc7f4501079b520ee7c409996d890179a0bde9))
+
 ## [0.13.0](https://github.com/branes-ai/synapse/compare/v0.12.0...v0.13.0) (2026-10-25)
 
 
