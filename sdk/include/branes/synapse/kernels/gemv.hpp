@@ -106,11 +106,11 @@ activations<A> prepare_activations(std::span<const float> x, std::span<std::byte
         } else {
             // The block scales decoded from binary16 once here, not once per
             // weight row in the dot.
-            float* d = ::new (static_cast<void*>(scratch.data() + q8_0_scale_offset(x.size()))) float[nb];
+            float* scales = ::new (static_cast<void*>(scratch.data() + q8_0_scale_offset(x.size()))) float[nb];
             for (std::size_t i = 0; i < nb; ++i) {
-                d[i] = fp16_to_float(blocks[i].d);
+                scales[i] = fp16_to_float(blocks[i].d);
             }
-            return {blocks, wide, d};
+            return {blocks, wide, scales};
         }
     }
 }
