@@ -12,6 +12,7 @@
 #include <branes/synapse/quant/scheme.hpp>
 
 #include <mtl/mat/block_matrix_view.hpp>
+#include <mtl/simd/batch.hpp>
 
 #include <algorithm>
 #include <array>
@@ -166,17 +167,36 @@ inline void gelu(std::span<const float> x, std::span<float> out) noexcept {
 }
 
 /// out = softmax(x).  Pre: equal, non-zero sizes.  May run in place (out == x).
+///
+/// The maximum is taken a vector at a time (exact in any order), and the
+/// exponentials are summed in a pass of their own, in element order, so the
+/// double sum's latency does not hold up the exponentials.
 inline void softmax(std::span<const float> x, std::span<float> out) noexcept {
     assert(x.size() == out.size() && !x.empty());  // Pre
-    const float max = *std::max_element(x.begin(), x.end());
-    double sum = 0.0;
-    for (std::size_t i = 0; i < out.size(); ++i) {
+    using lanes = mtl::simd::batch<float>;
+    constexpr std::size_t w = lanes::size;
+    const std::size_t n = x.size();
+    float max = x[0];
+    std::size_t i = 0;
+    for (; i + w <= n; i += w) {
+        max = std::max(max, reduce_max(lanes::load_unaligned(x.data() + i)));
+    }
+    for (; i < n; ++i) {
+        max = std::max(max, x[i]);
+    }
+    for (i = 0; i < n; ++i) {
         out[i] = std::exp(x[i] - max);
-        sum += out[i];
+    }
+    double sum = 0.0;
+    for (const float v : out) {
+        sum += v;
     }
     const auto scale = static_cast<float>(1.0 / sum);
-    for (auto& v : out) {
-        v *= scale;
+    for (i = 0; i + w <= n; i += w) {
+        (lanes::load_unaligned(out.data() + i) * lanes(scale)).store_unaligned(out.data() + i);
+    }
+    for (; i < n; ++i) {
+        out[i] *= scale;
     }
 }
 
