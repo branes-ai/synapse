@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.2](https://github.com/branes-ai/synapse/compare/v0.13.1...v0.13.2) (2026-10-25)
+
+
+### Performance
+
+* gelu by table lookup, split across threads ([#55](https://github.com/branes-ai/synapse/issues/55)) ([7749f12](https://github.com/branes-ai/synapse/commit/7749f12951273db96a6fd288e4dec5807661f04c))
+
 ## [0.13.1](https://github.com/branes-ai/synapse/compare/v0.13.0...v0.13.1) (2026-10-25)
 
 
