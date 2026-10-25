@@ -6,13 +6,15 @@ script named below; none is hand-edited.
 | File | What it is | Produced by |
 |---|---|---|
 | `quant_golden.gguf` | Quantized blocks and their dequantized values | `scripts/gen_quant_fixture.py` (gguf-py) |
-| `kernel_golden.gguf` | Weights, quantized activations, and ggml's `vec_dot` results | `scripts/gen_kernel_fixture.py` (ggml) |
+| `kernel_golden.gguf` | Weights, quantized activations, and ggml's `vec_dot` results; `ggml_gelu` and `ggml_norm` outputs | `scripts/gen_kernel_fixture.py` (ggml) |
 | `llama_tiny.gguf`, `llama_tiny_golden.gguf` | Tiny random-weight Llama model (quantized) and llama.cpp's logits | `scripts/gen_llama_fixture.py tiny` |
 | `llama_tiny_f32.gguf`, `llama_tiny_f32_golden.gguf` | The same with all-F32 weights | `scripts/gen_llama_fixture.py tiny-f32` |
 | `qwen2_tiny.gguf`, `qwen2_tiny_golden.gguf` | The quantized tiny model as Qwen2 (NEOX RoPE, Q/K/V and output biases) and llama.cpp's logits | `scripts/gen_llama_fixture.py qwen2-tiny` |
 | `qwen2_tiny_f32.gguf`, `qwen2_tiny_f32_golden.gguf` | The same with all-F32 weights and its own output matrix | `scripts/gen_llama_fixture.py qwen2-tiny-f32` |
 | `mistral3_tiny.gguf`, `mistral3_tiny_golden.gguf` | The quantized tiny model as Mistral 3 (YaRN, attention temperature, every optional bias) and llama.cpp's logits | `scripts/gen_llama_fixture.py mistral3-tiny` |
 | `mistral3_tiny_f32.gguf`, `mistral3_tiny_f32_golden.gguf` | The same with all-F32 weights, its own output matrix and a YaRN log multiplier | `scripts/gen_llama_fixture.py mistral3-tiny-f32` |
+| `clip_tiny.gguf`, `clip_tiny_golden.gguf` | Tiny random-weight idefics3 mmproj (SigLIP ViT, pixel shuffle, linear projector; F32 matrices) and llama.cpp's embeddings of a fixed image | `scripts/gen_clip_fixture.py tiny` |
+| `clip_tiny_q8.gguf`, `clip_tiny_q8_golden.gguf` | The same with Q8_0 matrices and the FFN stored swapped, as SmolVLM's files are | `scripts/gen_clip_fixture.py tiny-q8` |
 | `bpe_vocab.gguf`, `bpe_golden.gguf` | Synthetic Llama-3-style BPE vocabulary and llama.cpp's tokenizations | `scripts/gen_tokenizer_fixture.py synthetic` |
 | `qwen2_vocab.gguf`, `qwen2_golden.gguf` | The synthetic vocabulary with Qwen2's pre-tokenizer, and llama.cpp's tokenizations of its Qwen2 test vectors | `scripts/gen_tokenizer_fixture.py --pre qwen2 --cases qwen2 synthetic` |
 | `tekken_vocab.gguf`, `tekken_golden.gguf` | The synthetic vocabulary with Mistral's Tekken pre-tokenizer (merges trained to cross case boundaries), and llama.cpp's tokenizations | `scripts/gen_tokenizer_fixture.py --pre tekken --cases tekken synthetic` |
