@@ -332,15 +332,15 @@ void score_tile(const std::array<const float*, Q>& q,
     using lanes = attention_lanes;
     constexpr std::size_t w = lanes::size;
     std::array<lanes, Q * KV> acc{};
-    for (std::size_t d = 0; d < head_dim; ++d) {
-        std::array<lanes, KV> kd;
+    for (std::size_t c = 0; c < head_dim; ++c) {  // c, not d: MSVC C4459 against a test's global d
+        std::array<lanes, KV> kc;
         for (std::size_t v = 0; v < KV; ++v) {
-            kd[v] = lanes::load_unaligned(kt + d * stride + j + v * w);
+            kc[v] = lanes::load_unaligned(kt + c * stride + j + v * w);
         }
         for (std::size_t t = 0; t < Q; ++t) {
-            const lanes qd(q[t][d]);
+            const lanes qc(q[t][c]);
             for (std::size_t v = 0; v < KV; ++v) {
-                acc[t * KV + v] = fma(qd, kd[v], acc[t * KV + v]);
+                acc[t * KV + v] = fma(qc, kc[v], acc[t * KV + v]);
             }
         }
     }
@@ -470,8 +470,7 @@ inline void self_attend_head(std::span<const float> q,
                              std::span<float> out,
                              std::span<float> scores) noexcept {
     assert(n >= 1 && (h + 1) * head_dim <= row_size && i0 <= i1 && i1 <= n);  // Pre
-    assert(scores.size() >= self_attention_score_floats(n) &&
-           kt.size() >= head_dim * self_attention_key_stride(n));
+    assert(scores.size() >= self_attention_score_floats(n) && kt.size() >= head_dim * self_attention_key_stride(n));
     assert(q.size() >= n * row_size && v.size() >= n * row_size && out.size() >= n * row_size);
     constexpr std::size_t tile = self_attention_query_tile;
     const std::size_t off = h * head_dim;
