@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -78,24 +79,88 @@ inline void silu(std::span<const float> x, std::span<float> out) noexcept {
     }
 }
 
+namespace detail {
+
+/// float to binary16, rounding to nearest even, without branches: the
+/// arithmetic of ggml's fallback GGML_FP32_TO_FP16 (after Maratyszcza's FP16
+/// library). Scaling |f| by 2^112 and then 2^-110 sends what overflows to
+/// infinity; adding a power of two at the binary16 exponent of f leaves
+/// exactly the bits binary16 keeps, rounded by the float add. It equals
+/// float_to_fp16 for every float, NaN payloads included, and loops of it
+/// vectorize.
+///   Pre: the default floating-point environment (round to nearest, no
+///   flush-to-zero).
+inline std::uint16_t round_to_fp16(float f) noexcept {
+    const float scale_to_inf = 0x1.0p+112f;
+    const float scale_to_zero = 0x1.0p-110f;
+    float base = (std::fabs(f) * scale_to_inf) * scale_to_zero;
+    const std::uint32_t w = std::bit_cast<std::uint32_t>(f);
+    const std::uint32_t shl1_w = w + w;
+    const std::uint32_t sign = w & 0x80000000u;
+    const std::uint32_t bias = std::max(shl1_w & 0xff000000u, 0x71000000u);
+    base = std::bit_cast<float>((bias >> 1) + 0x07800000u) + base;
+    const std::uint32_t bits = std::bit_cast<std::uint32_t>(base);
+    const std::uint32_t exp_bits = (bits >> 13) & 0x00007c00u;
+    const std::uint32_t mantissa_bits = bits & 0x00000fffu;
+    const std::uint32_t nonsign = exp_bits + mantissa_bits;
+    // NaN keeps its top payload bits, quiet, as float_to_fp16 does (ggml's
+    // fallback returns 0x7e00 instead). A mask, not a ?: between the two
+    // results, which GCC will not vectorize.
+    const std::uint32_t nan = 0u - static_cast<std::uint32_t>(shl1_w > 0xff000000u);
+    const std::uint32_t nan_bits = 0x7e00u | ((w >> 13) & 0x3ffu);
+    return static_cast<std::uint16_t>((sign >> 16) | (nonsign & ~nan) | (nan_bits & nan));
+}
+
+/// ggml_gelu_f32 of every binary16 value h, rounded to binary16 and widened
+/// back: what gelu returns for any x inside the cutoffs that rounds to h.
+/// ggml_table_gelu_f16 holds the same values as halves; holding floats saves
+/// the widening per element. Built on first use, in static storage, so a
+/// session that runs gelu still allocates nothing.
+struct gelu_table_t {
+    std::array<float, 65536> values;
+    // Fills values in place, keeping 256 KiB off the stack of whichever
+    // thread runs gelu first.
+    gelu_table_t() noexcept {
+        constexpr float coef_a = 0.044715f;
+        constexpr float sqrt_2_over_pi = 0.79788456080286535587989211986876f;
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            const float h = fp16_to_float(static_cast<std::uint16_t>(i));
+            const float g = 0.5f * h * (1.0f + std::tanh(sqrt_2_over_pi * h * (1.0f + coef_a * h * h)));
+            values[i] = fp16_to_float(float_to_fp16(g));
+        }
+    }
+};
+
+inline const std::array<float, 65536>& gelu_table() noexcept {
+    static const gelu_table_t table;
+    return table.values;
+}
+
+/// Elements gelu rounds at a time: the binary16 patterns of a chunk go to a
+/// stack buffer first, so the rounding loop vectorizes apart from the lookups.
+inline constexpr std::size_t gelu_chunk = 256;
+
+}  // namespace detail
+
 /// out = gelu(x) with the tanh approximation, computed as ggml's CPU
 /// ggml_vec_gelu_f32 does: x <= -10 gives 0, x >= 10 gives x, and otherwise x
 /// is rounded to binary16 and the result is ggml_gelu_f32 of that half,
-/// rounded to binary16 (ggml reads it from a 65536-entry table built so).
-///   Pre: equal sizes.
+/// rounded to binary16, read from a 65536-entry table as ggml reads it.
+///   Pre: equal sizes; the default floating-point environment.
 inline void gelu(std::span<const float> x, std::span<float> out) noexcept {
     assert(x.size() == out.size());  // Pre
-    constexpr float coef_a = 0.044715f;
-    constexpr float sqrt_2_over_pi = 0.79788456080286535587989211986876f;
-    for (std::size_t i = 0; i < out.size(); ++i) {
-        if (x[i] <= -10.0f) {
-            out[i] = 0.0f;
-        } else if (x[i] >= 10.0f) {
-            out[i] = x[i];
-        } else {
-            const float h = fp16_to_float(float_to_fp16(x[i]));
-            const float g = 0.5f * h * (1.0f + std::tanh(sqrt_2_over_pi * h * (1.0f + coef_a * h * h)));
-            out[i] = fp16_to_float(float_to_fp16(g));
+    const std::array<float, 65536>& table = detail::gelu_table();
+    std::array<std::uint16_t, detail::gelu_chunk> h{};
+    for (std::size_t i = 0; i < x.size(); i += detail::gelu_chunk) {
+        const std::size_t len = std::min(detail::gelu_chunk, x.size() - i);
+        for (std::size_t j = 0; j < len; ++j) {
+            h[j] = detail::round_to_fp16(x[i + j]);
+        }
+        for (std::size_t j = 0; j < len; ++j) {
+            const float v = x[i + j];
+            const float t = table[h[j]];
+            const float above = v >= 10.0f ? v : t;  // selects, not branches: the loop vectorizes
+            out[i + j] = v <= -10.0f ? 0.0f : above;
         }
     }
 }
