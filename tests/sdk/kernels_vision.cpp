@@ -198,59 +198,68 @@ TEST_CASE("kernels_vision: pixel_shuffle is llama.cpp's patch merge", "[kernels]
 }
 
 TEST_CASE("kernels_vision: self-attention attends every row to every row", "[kernels][vision]") {
-    std::mt19937 rng(5);
-    std::normal_distribution<float> normal(0.0f, 1.0f);
-    constexpr std::size_t n = 37;
-    constexpr std::size_t heads = 3;
-    constexpr std::size_t hd = 8;
-    constexpr std::size_t row = heads * hd;
-    std::vector<float> q(n * row);
-    std::vector<float> k(n * row);
-    std::vector<float> v(n * row);
-    for (auto* t : {&q, &k, &v}) {
-        for (auto& x : *t) {
-            x = normal(rng);
+    // Query counts around the tile and key counts around the vector width;
+    // head dims the vector divides and ones it does not.
+    for (auto [n, hd] : {std::array<std::size_t, 2>{37, 8}, {1, 8}, {6, 4}, {13, 12}, {50, 20}}) {
+        INFO("n " << n << ", head_dim " << hd);
+        std::mt19937 rng(5);
+        std::normal_distribution<float> normal(0.0f, 1.0f);
+        constexpr std::size_t heads = 3;
+        const std::size_t row = heads * hd;
+        std::vector<float> q(n * row);
+        std::vector<float> k(n * row);
+        std::vector<float> v(n * row);
+        for (auto* t : {&q, &k, &v}) {
+            for (auto& x : *t) {
+                x = normal(rng);
+            }
         }
-    }
-    const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
-    std::vector<float> out(n * row);
-    std::vector<float> scores(n);
-    for (std::size_t h = 0; h < heads; ++h) {
-        kernels::self_attend_head(q, k, v, n, row, hd, h, 0, n, scale, out, scores);
-    }
-    for (std::size_t i = 0; i < n; ++i) {
+        const float scale = 1.0f / std::sqrt(static_cast<float>(hd));
+        std::vector<float> out(n * row);
+        std::vector<float> kt(hd * kernels::self_attention_key_stride(n));
+        std::vector<float> scores(kernels::self_attention_score_floats(n));
         for (std::size_t h = 0; h < heads; ++h) {
-            std::vector<double> p(n);
-            double max = -1e300;
-            for (std::size_t j = 0; j < n; ++j) {
-                double d = 0.0;
-                for (std::size_t e = 0; e < hd; ++e) {
-                    d += static_cast<double>(q[i * row + h * hd + e]) * k[j * row + h * hd + e];
-                }
-                p[j] = d * scale;
-                max = std::max(max, p[j]);
-            }
-            double sum = 0.0;
-            for (auto& x : p) {
-                x = std::exp(x - max);
-                sum += x;
-            }
-            for (std::size_t e = 0; e < hd; ++e) {
-                double ref = 0.0;
+            kernels::self_attention_keys(k, n, row, hd, h, kt);
+            kernels::self_attend_head(q, kt, v, n, row, hd, h, 0, n, scale, out, scores);
+        }
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t h = 0; h < heads; ++h) {
+                std::vector<double> p(n);
+                double max = -1e300;
                 for (std::size_t j = 0; j < n; ++j) {
-                    ref += p[j] / sum * v[j * row + h * hd + e];
+                    double d = 0.0;
+                    for (std::size_t e = 0; e < hd; ++e) {
+                        d += static_cast<double>(q[i * row + h * hd + e]) * k[j * row + h * hd + e];
+                    }
+                    p[j] = d * scale;
+                    max = std::max(max, p[j]);
                 }
-                CHECK(std::fabs(out[i * row + h * hd + e] - ref) <= 1e-5);
+                double sum = 0.0;
+                for (auto& x : p) {
+                    x = std::exp(x - max);
+                    sum += x;
+                }
+                for (std::size_t e = 0; e < hd; ++e) {
+                    double ref = 0.0;
+                    for (std::size_t j = 0; j < n; ++j) {
+                        ref += p[j] / sum * v[j * row + h * hd + e];
+                    }
+                    CHECK(std::fabs(out[i * row + h * hd + e] - ref) <= 1e-5);
+                }
             }
         }
-    }
 
-    // Splitting the queries into ranges changes nothing, bit for bit (D1).
-    std::vector<float> split(n * row);
-    for (std::size_t h = 0; h < heads; ++h) {
-        kernels::self_attend_head(q, k, v, n, row, hd, h, 0, 10, scale, split, scores);
-        kernels::self_attend_head(q, k, v, n, row, hd, h, 10, 11, scale, split, scores);
-        kernels::self_attend_head(q, k, v, n, row, hd, h, 11, n, scale, split, scores);
+        // Splitting the queries into ranges that cut the tiles differently
+        // changes nothing, bit for bit (D1).
+        std::vector<float> split(n * row);
+        const std::size_t a = std::min<std::size_t>(n, 10);
+        const std::size_t b = std::min<std::size_t>(n, 11);
+        for (std::size_t h = 0; h < heads; ++h) {
+            kernels::self_attention_keys(k, n, row, hd, h, kt);
+            kernels::self_attend_head(q, kt, v, n, row, hd, h, 0, a, scale, split, scores);
+            kernels::self_attend_head(q, kt, v, n, row, hd, h, a, b, scale, split, scores);
+            kernels::self_attend_head(q, kt, v, n, row, hd, h, b, n, scale, split, scores);
+        }
+        CHECK(split == out);
     }
-    CHECK(split == out);
 }

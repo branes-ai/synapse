@@ -128,8 +128,8 @@ inline constexpr std::size_t max_graph_bytes = std::numeric_limits<std::size_t>:
 
 /// Query blocks each head of a self_attention is split into, so a few heads
 /// still spread over many threads; each (head, block) unit has its own slot
-/// of max_batch scores in the op's scratch.
-inline constexpr std::size_t self_attention_query_blocks = 4;
+/// of kernels::self_attention_score_floats(max_batch) in the op's scratch.
+inline constexpr std::size_t self_attention_query_blocks = 16;
 
 /// The id the builder returns after an error; operations on it are no-ops.
 inline constexpr tensor_id invalid_tensor = std::numeric_limits<tensor_id>::max();
@@ -839,15 +839,22 @@ public:
         if (!std::isfinite(scale) || scale <= 0.0f) {
             return fail(graph_errc::bad_parameter);
         }
-        // One max_batch slot of scores per (head, query block) unit, so the
-        // units run concurrently.
+        // Every head's K transposed (size_of(q) rows of a key stride), then
+        // one slot of scores per (head, query block) unit, so the units run
+        // concurrently.
         const std::size_t units = n_heads * self_attention_query_blocks;
-        if (n_heads > max_graph_bytes / self_attention_query_blocks ||
-            g_.max_batch_ > max_graph_bytes / sizeof(float) / units) {
+        const std::size_t limit = max_graph_bytes / sizeof(float);
+        if (n_heads > max_graph_bytes / self_attention_query_blocks || g_.max_batch_ > limit) {
             return fail(graph_errc::too_large);
         }
+        const std::size_t stride = kernels::self_attention_key_stride(g_.max_batch_);
+        const std::size_t slot = kernels::self_attention_score_floats(g_.max_batch_);
+        if (stride > limit / size_of(q) || units > (limit - size_of(q) * stride) / slot) {
+            return fail(graph_errc::too_large);
+        }
+        const std::size_t floats = size_of(q) * stride + units * slot;
         const tensor_id out = add_floats(size_of(q), tensor_role::intermediate, true);
-        const tensor_id scratch = add_tensor(units * g_.max_batch_ * sizeof(float), 0, tensor_role::scratch, false);
+        const tensor_id scratch = add_tensor(floats * sizeof(float), 0, tensor_role::scratch, false);
         if (out == invalid_tensor || scratch == invalid_tensor) {
             return invalid_tensor;
         }

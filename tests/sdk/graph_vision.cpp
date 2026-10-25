@@ -175,9 +175,11 @@ TEST_CASE("graph_vision: a session runs a patch graph only in full and without t
     std::vector<float> want_g(in.size());
     kernels::gelu(want_h, want_g);
     std::vector<float> want_a(in.size());
-    std::vector<float> scores(16);
+    std::vector<float> kt(4 * kernels::self_attention_key_stride(16));
+    std::vector<float> scores(kernels::self_attention_score_floats(16));
     for (std::size_t hd = 0; hd < 2; ++hd) {
-        kernels::self_attend_head(want_g, want_g, want_g, 16, 8, 4, hd, 0, 16, 0.5f, want_a, scores);
+        kernels::self_attention_keys(want_g, 16, 8, 4, hd, kt);
+        kernels::self_attend_head(want_g, kt, want_g, 16, 8, 4, hd, 0, 16, 0.5f, want_a, scores);
     }
     std::vector<float> want(in.size());
     kernels::pixel_shuffle(want_a, 8, 4, 4, 2, want);

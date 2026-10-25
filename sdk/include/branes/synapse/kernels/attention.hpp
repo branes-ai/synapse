@@ -27,6 +27,7 @@
 #include <branes/synapse/numeric/half.hpp>
 
 #include <mtl/simd/algorithm.hpp>
+#include <mtl/simd/batch.hpp>
 
 #include <algorithm>
 #include <array>
@@ -267,19 +268,197 @@ inline void attention(std::span<const float> q,
     }
 }
 
+/// Floats in each of the head_dim rows of a head's transposed K
+/// (self_attention_keys): n keys, padded with zeros to whole vectors.
+inline constexpr std::size_t self_attention_key_stride(std::size_t n) noexcept {
+    constexpr std::size_t w = mtl::simd::batch<float>::size;
+    return (n + w - 1) / w * w;
+}
+
+/// Queries self_attend_head computes together, sharing each K and V load.
+inline constexpr std::size_t self_attention_query_tile = 6;
+
+/// Floats of scores self_attend_head needs: a padded score row per query of a tile.
+inline constexpr std::size_t self_attention_score_floats(std::size_t n) noexcept {
+    return self_attention_query_tile * self_attention_key_stride(n);
+}
+
+/// kt = head h of k transposed: kt[d * stride + j] = k_j[h * head_dim + d],
+/// stride = self_attention_key_stride(n), zero beyond key n - 1. With it,
+/// one vector operation advances the dots of a vector's worth of keys.
+///   Pre: k holds n rows of row_size floats; (h + 1) * head_dim <= row_size;
+///        kt.size() >= head_dim * stride.
+inline void self_attention_keys(std::span<const float> k,
+                                std::size_t n,
+                                std::size_t row_size,
+                                std::size_t head_dim,
+                                std::size_t h,
+                                std::span<float> kt) noexcept {
+    const std::size_t stride = self_attention_key_stride(n);
+    assert((h + 1) * head_dim <= row_size && k.size() >= n * row_size && kt.size() >= head_dim * stride);  // Pre
+    // Blocks of keys, so each kt row is written a cache line at a time.
+    constexpr std::size_t keys = 16;
+    for (std::size_t j0 = 0; j0 < n; j0 += keys) {
+        const std::size_t j1 = std::min(n, j0 + keys);
+        for (std::size_t d = 0; d < head_dim; ++d) {
+            const float* kd = k.data() + h * head_dim + d;
+            for (std::size_t j = j0; j < j1; ++j) {
+                kt[d * stride + j] = kd[j * row_size];
+            }
+        }
+    }
+    for (std::size_t d = 0; d < head_dim; ++d) {
+        std::fill(kt.begin() + static_cast<std::ptrdiff_t>(d * stride + n),
+                  kt.begin() + static_cast<std::ptrdiff_t>((d + 1) * stride),
+                  0.0f);
+    }
+}
+
+namespace detail {
+
+using attention_lanes = mtl::simd::batch<float>;
+
+/// Scores of Q queries against the KV vectors of keys from j:
+/// s[t * stride + j ..] = scale * (q[t] . k_j ..), each dot one fma chain
+/// in d order, the same for every Q and KV.
+template <std::size_t Q, std::size_t KV>
+void score_tile(const std::array<const float*, Q>& q,
+                const float* kt,
+                std::size_t stride,
+                std::size_t head_dim,
+                std::size_t j,
+                float scale,
+                float* s) noexcept {
+    using lanes = attention_lanes;
+    constexpr std::size_t w = lanes::size;
+    std::array<lanes, Q * KV> acc{};
+    for (std::size_t c = 0; c < head_dim; ++c) {  // c, not d: MSVC C4459 against a test's global d
+        std::array<lanes, KV> kc;
+        for (std::size_t v = 0; v < KV; ++v) {
+            kc[v] = lanes::load_unaligned(kt + c * stride + j + v * w);
+        }
+        for (std::size_t t = 0; t < Q; ++t) {
+            const lanes qc(q[t][c]);
+            for (std::size_t v = 0; v < KV; ++v) {
+                acc[t * KV + v] = fma(qc, kc[v], acc[t * KV + v]);
+            }
+        }
+    }
+    for (std::size_t t = 0; t < Q; ++t) {
+        for (std::size_t v = 0; v < KV; ++v) {
+            (acc[t * KV + v] * lanes(scale)).store_unaligned(s + t * stride + j + v * w);
+        }
+    }
+}
+
+/// o[t][e0 .. e0 + DV vectors) = sum_j p[t * stride + j] v_j[e0 ..] for Q
+/// queries, each element one fma chain in j order, the same for every Q and DV.
+template <std::size_t Q, std::size_t DV>
+void weigh_tile(const float* p,
+                std::size_t stride,
+                const float* v,
+                std::size_t n,
+                std::size_t row_size,
+                const std::array<float*, Q>& o,
+                std::size_t e0) noexcept {
+    using lanes = attention_lanes;
+    constexpr std::size_t w = lanes::size;
+    std::array<lanes, Q * DV> acc{};
+    for (std::size_t j = 0; j < n; ++j) {
+        std::array<lanes, DV> vj;
+        for (std::size_t u = 0; u < DV; ++u) {
+            vj[u] = lanes::load_unaligned(v + j * row_size + e0 + u * w);
+        }
+        for (std::size_t t = 0; t < Q; ++t) {
+            const lanes pj(p[t * stride + j]);
+            for (std::size_t u = 0; u < DV; ++u) {
+                acc[t * DV + u] = fma(pj, vj[u], acc[t * DV + u]);
+            }
+        }
+    }
+    for (std::size_t t = 0; t < Q; ++t) {
+        for (std::size_t u = 0; u < DV; ++u) {
+            acc[t * DV + u].store_unaligned(o[t] + e0 + u * w);
+        }
+    }
+}
+
+/// self_attend_head for the Q queries from i.
+template <std::size_t Q>
+void self_attend_tile(const float* q,
+                      const float* kt,
+                      const float* v,
+                      std::size_t n,
+                      std::size_t row_size,
+                      std::size_t off,
+                      std::size_t head_dim,
+                      std::size_t i,
+                      float scale,
+                      float* out,
+                      float* s) noexcept {
+    constexpr std::size_t w = attention_lanes::size;
+    constexpr std::size_t kv = 2;  // key vectors per score tile
+    constexpr std::size_t dv = 2;  // output vectors per weighted-sum tile
+    const std::size_t stride = self_attention_key_stride(n);
+    std::array<const float*, Q> qt;
+    std::array<float*, Q> ot;
+    for (std::size_t t = 0; t < Q; ++t) {
+        qt[t] = q + (i + t) * row_size + off;
+        ot[t] = out + (i + t) * row_size + off;
+    }
+    std::size_t j = 0;
+    for (; j + kv * w <= stride; j += kv * w) {
+        score_tile<Q, kv>(qt, kt, stride, head_dim, j, scale, s);
+    }
+    for (; j < stride; j += w) {
+        score_tile<Q, 1>(qt, kt, stride, head_dim, j, scale, s);
+    }
+    for (std::size_t t = 0; t < Q; ++t) {
+        const std::span<float> st{s + t * stride, n};
+        softmax(st, st);  // in place
+    }
+    const float* vh = v + off;
+    std::size_t e = 0;
+    for (; e + dv * w <= head_dim; e += dv * w) {
+        weigh_tile<Q, dv>(s, stride, vh, n, row_size, ot, e);
+    }
+    for (; e + w <= head_dim; e += w) {
+        weigh_tile<Q, 1>(s, stride, vh, n, row_size, ot, e);
+    }
+    for (e = head_dim / w * w; e < head_dim; ++e) {  // a head_dim the vector does not divide
+        for (std::size_t t = 0; t < Q; ++t) {
+            const float* pt = s + t * stride;
+            const float* ve = vh + e;
+            float acc = 0.0f;
+            for (std::size_t jj = 0; jj < n; ++jj, ve += row_size) {
+                acc = mtl::simd::scalar_fma(pt[jj], *ve, acc);
+            }
+            ot[t][e] = acc;
+        }
+    }
+}
+
+}  // namespace detail
+
 /// One head of bidirectional self-attention over n positions, with float
 /// operands and no cache, as llama.cpp's vision encoders compute it without
 /// flash attention (ggml_mul_mat of K and Q, ggml_soft_max_ext with the
 /// scale, ggml_mul_mat of V and the probabilities): for every query position
 /// i in [i0, i1), out_i = softmax_j(scale * q_i . k_j) v_j over j = 0..n-1,
-/// on head h's head_dim elements of each row. It writes only those rows of
-/// head h of out, and scores, so heads and query ranges can run on different
-/// threads; each row's result does not depend on the range it is computed in.
-///   Pre: q, k, v, out hold n rows of row_size floats; h * head_dim + head_dim
-///        <= row_size; i0 <= i1 <= n; n >= 1; scores.size() >= n; out does not
-///        alias q, k, v or scores.
+/// on head h's head_dim elements of each row. kt is head h of k transposed
+/// by self_attention_keys. It writes only those rows of head h of out, and
+/// scores, so heads and query ranges can run on different threads.
+///
+/// Register-tiled: self_attention_query_tile queries share every load of kt
+/// and of a V row. Each score is one fma chain over d and each output
+/// element one over j, whatever the tile, so a row's result does not depend
+/// on the range it is computed in (D1).
+///   Pre: q, v, out hold n rows of row_size floats; h * head_dim + head_dim
+///        <= row_size; kt.size() >= head_dim * self_attention_key_stride(n);
+///        i0 <= i1 <= n; n >= 1; scores.size() >= self_attention_score_floats(n);
+///        out does not alias q, kt, v or scores.
 inline void self_attend_head(std::span<const float> q,
-                             std::span<const float> k,
+                             std::span<const float> kt,
                              std::span<const float> v,
                              std::size_t n,
                              std::size_t row_size,
@@ -290,26 +469,19 @@ inline void self_attend_head(std::span<const float> q,
                              float scale,
                              std::span<float> out,
                              std::span<float> scores) noexcept {
-    assert(n >= 1 && (h + 1) * head_dim <= row_size && i0 <= i1 && i1 <= n && scores.size() >= n);  // Pre
-    assert(q.size() >= n * row_size && k.size() >= n * row_size && v.size() >= n * row_size &&
-           out.size() >= n * row_size);
+    assert(n >= 1 && (h + 1) * head_dim <= row_size && i0 <= i1 && i1 <= n);  // Pre
+    assert(scores.size() >= self_attention_score_floats(n) && kt.size() >= head_dim * self_attention_key_stride(n));
+    assert(q.size() >= n * row_size && v.size() >= n * row_size && out.size() >= n * row_size);
+    constexpr std::size_t tile = self_attention_query_tile;
     const std::size_t off = h * head_dim;
-    const std::span<float> s = scores.first(n);
-    for (std::size_t i = i0; i < i1; ++i) {
-        const float* qi = q.data() + i * row_size + off;
-        for (std::size_t j = 0; j < n; ++j) {
-            s[j] = mtl::simd::reduce_dot(qi, k.data() + j * row_size + off, head_dim) * scale;
-        }
-        softmax(s, s);  // in place
-        float* oi = out.data() + i * row_size + off;
-        std::fill_n(oi, head_dim, 0.0f);
-        for (std::size_t j = 0; j < n; ++j) {
-            const float p = s[j];
-            const float* vj = v.data() + j * row_size + off;
-            for (std::size_t d = 0; d < head_dim; ++d) {
-                oi[d] += p * vj[d];
-            }
-        }
+    std::size_t i = i0;
+    for (; i + tile <= i1; i += tile) {
+        detail::self_attend_tile<tile>(
+            q.data(), kt.data(), v.data(), n, row_size, off, head_dim, i, scale, out.data(), scores.data());
+    }
+    for (; i < i1; ++i) {
+        detail::self_attend_tile<1>(
+            q.data(), kt.data(), v.data(), n, row_size, off, head_dim, i, scale, out.data(), scores.data());
     }
 }
 

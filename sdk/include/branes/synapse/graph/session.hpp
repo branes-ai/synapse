@@ -410,19 +410,30 @@ private:
         const std::size_t size = graph_->tensors()[o.q].size;
         const std::size_t head_dim = size / o.n_heads;
         const std::span<std::byte> scratch = bytes(o.scratch);
-        const std::span<float> scores{reinterpret_cast<float*>(scratch.data()), scratch.size() / sizeof(float)};
-        const std::size_t slot = graph_->max_batch();
-        // Work units are (head, block of queries); a unit's scores live in its
-        // slot. Every row's result is independent of the split (D1).
+        const std::span<float> all{reinterpret_cast<float*>(scratch.data()), scratch.size() / sizeof(float)};
+        // Every head's K transposed, then one slot of scores per work unit.
+        const std::size_t head_keys = head_dim * kernels::self_attention_key_stride(n_);
+        const std::span<float> kt = all.first(o.n_heads * head_keys);
+        const std::span<float> scores = all.subspan(kt.size());
+        const std::size_t slot = kernels::self_attention_score_floats(n_);
+        parallel(o.n_heads, 1, [&](std::size_t h0, std::size_t h1) {
+            for (std::size_t h = h0; h < h1; ++h) {
+                kernels::self_attention_keys(active(o.k), n_, size, head_dim, h, kt.subspan(h * head_keys, head_keys));
+            }
+        });
+        // Work units are (head, block of queries), blocks whole query tiles
+        // where they can be; a unit's scores live in its slot. Every row's
+        // result is independent of the split (D1).
         const std::size_t blocks = self_attention_query_blocks;
-        const std::size_t per_block = (n_ + blocks - 1) / blocks;
+        const std::size_t tile = kernels::self_attention_query_tile;
+        const std::size_t per_block = ((n_ + blocks - 1) / blocks + tile - 1) / tile * tile;
         parallel(o.n_heads * blocks, 1, [&](std::size_t u0, std::size_t u1) {
             for (std::size_t u = u0; u < u1; ++u) {
                 const std::size_t h = u / blocks;
                 const std::size_t i0 = std::min(n_, (u % blocks) * per_block);
                 const std::size_t i1 = std::min(n_, i0 + per_block);
                 kernels::self_attend_head(active(o.q),
-                                          active(o.k),
+                                          kt.subspan(h * head_keys, head_keys),
                                           active(o.v),
                                           n_,
                                           size,
