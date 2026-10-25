@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/branes-ai/synapse/compare/v0.12.0...v0.13.0) (2026-10-25)
+
+
+### Features
+
+* run llama.cpp mmproj image encoders, SigLIP with the idefics3 projector ([#48](https://github.com/branes-ai/synapse/issues/48)) ([2a53439](https://github.com/branes-ai/synapse/commit/2a53439ed5ad581d00b33fa22949113be42788a8)), closes [#45](https://github.com/branes-ai/synapse/issues/45)
+
 ## [0.12.0](https://github.com/branes-ai/synapse/compare/v0.11.1...v0.12.0) (2026-10-24)
 
 
