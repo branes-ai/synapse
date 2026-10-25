@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.3](https://github.com/branes-ai/synapse/compare/v0.13.2...v0.13.3) (2026-10-25)
+
+
+### Performance
+
+* register-tiled self-attention for the image encoder ([#57](https://github.com/branes-ai/synapse/issues/57)) ([98b68a4](https://github.com/branes-ai/synapse/commit/98b68a4f6fafe1577ac9a2da8f646fbf7546c8c2))
+
 ## [0.13.2](https://github.com/branes-ai/synapse/compare/v0.13.1...v0.13.2) (2026-10-25)
 
 
