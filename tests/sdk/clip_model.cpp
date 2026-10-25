@@ -8,10 +8,10 @@
 // and synapse encodes the golden file's image and compares every token's
 // embedding with llama.cpp's. Skipped when either variable is unset.
 //
-// SmolVLM-256M-Instruct's F16 file agrees to 1.7e-3 rms (cosine 0.999999):
+// SmolVLM-256M-Instruct's F16 file agrees to 2.3e-3 rms (cosine 0.999998):
 // ggml rounds the activations of an F16 matmul to F16 and synapse keeps them
-// float, and 12 layers carry that. The Q8_0 file agrees to 4.8e-2 (cosine
-// 0.9992): both sides quantize activations to Q8_0, and once one block's
+// float, and 12 layers carry that. The Q8_0 file agrees to 4.7e-2 (cosine
+// 0.9991; per token, the worst of the SIMD targets): both sides quantize activations to Q8_0, and once one block's
 // scale rounds the other way, SigLIP's outlier activations spread it. That is
 // less than the 7% llama.cpp's own Q8_0 and F16 encoders differ by. A wrong
 // kernel or graph is O(1), with cosine far from 1.

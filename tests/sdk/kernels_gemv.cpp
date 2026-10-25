@@ -142,9 +142,11 @@ TEST_CASE("kernels: Q8_K quantizer fills bsums and handles zero blocks", "[kerne
 }
 
 TEST_CASE("kernels: gemv_scratch_bytes", "[kernels]") {
-    // Blocks, then the int16-widened quants; for Q8_K also each block's 16
-    // sub-block sums, contiguous (the operand of Q4_K's min terms).
-    STATIC_REQUIRE(kernels::gemv_scratch_bytes<quant::scheme<tensor_type::q4_0>>(4096) == 128 * 34 + 4096 * 2);
+    // Blocks, then the int16-widened quants; for Q8_0 also each block's
+    // scale decoded to float, for Q8_K each block's 16 sub-block sums,
+    // contiguous (the operand of Q4_K's min terms).
+    STATIC_REQUIRE(kernels::gemv_scratch_bytes<quant::scheme<tensor_type::q4_0>>(4096) ==
+                   128 * 34 + 4096 * 2 + 128 * 4);
     STATIC_REQUIRE(kernels::gemv_scratch_bytes<quant::scheme<tensor_type::q4_k>>(4096) ==
                    16 * 292 + 4096 * 2 + 16 * 16 * 2);
     STATIC_REQUIRE(kernels::gemv_scratch_bytes<quant::scheme<tensor_type::f16>>(4096) == 0);

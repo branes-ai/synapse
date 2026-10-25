@@ -18,12 +18,15 @@
 /// Weights are unpacked to int16 with their offset (and, for the K formats,
 /// their sub-block scale) folded in, a chunk of up to chunk_elements weights
 /// at a time; activations are widened to int16 once per product (see
-/// activations<>). Each chunk is one mtl::simd::reduce_dot_block_scaled
-/// (MTL5 >= 5.20): every block's exact integer sum stays in vector lanes and
-/// is scaled in-register by d_w * d_a, with one horizontal reduce per chunk
-/// rather than one per block. No overflow is possible: |w| <= 4096 and
-/// |a| <= 127, so a block sums to at most 256 * 4096 * 127 < 2^28, inside the
-/// primitive's per-block precondition of 2^31.
+/// activations<>). Each chunk is one block-scaled sum (detail::
+/// block_scaled_dots, on MTL5 >= 5.20's widening dot and lane conversion):
+/// every block's exact integer sum stays in vector lanes and is scaled
+/// in-register by d_w * d_a, with one horizontal reduce per chunk rather than
+/// one per block. gemm computes a register tile of weight rows x activation
+/// rows at once, each pair exactly as gemv computes it. No overflow is
+/// possible: |w| <= 4096 and |a| <= 127, so a block sums to at most
+/// 256 * 4096 * 127 < 2^28, well inside the int32 lanes (converting a lane
+/// to float rounds once it passes 2^24, the same in gemv and gemm).
 ///
 /// Reproducibility: every block's integer sum is exact, and the float order
 /// is fixed for a given target, so results are deterministic run to run, and
@@ -37,6 +40,7 @@
 #include <branes/synapse/quant/scheme.hpp>
 
 #include <mtl/simd/algorithm.hpp>
+#include <mtl/simd/batch.hpp>
 #include <mtl/version.hpp>
 
 #include <algorithm>
@@ -44,11 +48,12 @@
 #include <cstddef>
 #include <cstdint>
 
-// simd::reduce_dot_block_scaled arrived in MTL5 5.20.0. Checked here as well
+// batch<float>::convert, the lane conversion block_scaled_dots scales the
+// integer sums with, arrived in MTL5 5.20.0. Checked here as well
 // as in cmake/deps.cmake, so an older MTL5 supplied by a parent project fails
 // with this message rather than deep inside a kernel.
 static_assert(MTL5_VERSION_MAJOR > 5 || (MTL5_VERSION_MAJOR == 5 && MTL5_VERSION_MINOR >= 20),
-              "synapse requires MTL5 >= 5.20.0 (mtl::simd::reduce_dot_block_scaled)");
+              "synapse requires MTL5 >= 5.20.0 (mtl::simd::batch<float>::convert)");
 
 namespace branes::synapse::kernels {
 
@@ -63,6 +68,7 @@ template <>
 struct activations<quant::block_q8_0> {
     const quant::block_q8_0* blocks;
     const std::int16_t* wide;  ///< 32 per block
+    const float* d;            ///< the blocks' scales, decoded from binary16
 };
 
 template <>
@@ -110,7 +116,7 @@ struct block_kernel<quant::scheme<quant::tensor_type::q4_0>> {
         return {fp16_to_float(b.d)};
     }
     static float act_scale(act a, std::size_t i) noexcept {
-        return fp16_to_float(a.blocks[i].d);
+        return a.d[i];
     }
 };
 
@@ -133,7 +139,7 @@ struct block_kernel<quant::scheme<quant::tensor_type::q5_0>> {
         return {fp16_to_float(b.d)};
     }
     static float act_scale(act a, std::size_t i) noexcept {
-        return fp16_to_float(a.blocks[i].d);
+        return a.d[i];
     }
 };
 
@@ -153,7 +159,7 @@ struct block_kernel<quant::scheme<quant::tensor_type::q8_0>> {
         return {fp16_to_float(b.d)};
     }
     static float act_scale(act a, std::size_t i) noexcept {
-        return fp16_to_float(a.blocks[i].d);
+        return a.d[i];
     }
 };
 
@@ -235,10 +241,93 @@ struct block_kernel<quant::scheme<quant::tensor_type::q6_k>> {
 template <typename K>
 concept has_min_term = requires { requires K::has_mins; };
 
+namespace detail {
+
+using lanes_i32 = mtl::simd::batch<std::int32_t>;
+using lanes_f32 = mtl::simd::batch<float>;
+
+/// The block-scaled dots of R x T operand pairs at once: for weight operand
+/// w[r] and activation operand x[t], each nb blocks of `len` int16,
+///
+///   sums[r * T + t] = sum_b scale[(r * T + t) * nb + b] * (w[r]_b . x[t]_b).
+///
+/// Register-blocked: each block of one operand meets T (or R) blocks of the
+/// other while it is in registers. Every pair is computed the same way
+/// whatever R and T are, so tiling does not change a result (G1, D1): the
+/// block's exact integer sum in lanes (widen_dot_accumulate), converted, and
+/// accumulated as fma(lanes, scale_b, acc) into one float accumulator in
+/// block order; then one horizontal reduce. A block length the vector does
+/// not divide (on wide targets, Q8_K's 16-element sub-blocks) is summed
+/// exactly in a scalar and scaled in block order instead.
+///
+/// A short block (Q8_0's 32) is finished one pair at a time, which keeps the
+/// R x T float accumulators in registers. A long one (the K formats' 256)
+/// walks the block a vector at a time for all pairs, which keeps their
+/// integer sums in registers instead. The integer lanes are exact either
+/// way, so the two orders give the same lanes and the same result.
+template <std::size_t R, std::size_t T, std::size_t len>
+void block_scaled_dots(const std::array<const std::int16_t*, R>& w,
+                       const std::array<const std::int16_t*, T>& x,
+                       const float* scale,
+                       std::size_t nb,
+                       std::array<float, R * T>& sums) noexcept {
+    constexpr std::size_t step = lanes_i32::widen_step;
+    if constexpr (len % step == 0) {
+        std::array<lanes_f32, R * T> acc{};
+        for (std::size_t b = 0; b < nb; ++b) {
+            if constexpr (len <= 2 * step) {
+                for (std::size_t r = 0; r < R; ++r) {
+                    for (std::size_t t = 0; t < T; ++t) {
+                        lanes_i32 s0{}, s1{};  // s1 must start zeroed (mtl::simd::batch)
+                        for (std::size_t i = 0; i < len; i += step) {
+                            lanes_i32::widen_dot_accumulate(w[r] + b * len + i, x[t] + b * len + i, s0, s1);
+                        }
+                        const std::size_t p = r * T + t;
+                        acc[p] = fma(lanes_f32::convert(s0 + s1), lanes_f32(scale[p * nb + b]), acc[p]);
+                    }
+                }
+            } else {
+                std::array<lanes_i32, R * T> s0{}, s1{};  // s1 must start zeroed (mtl::simd::batch)
+                for (std::size_t i = 0; i < len; i += step) {
+                    for (std::size_t r = 0; r < R; ++r) {
+                        for (std::size_t t = 0; t < T; ++t) {
+                            lanes_i32::widen_dot_accumulate(
+                                w[r] + b * len + i, x[t] + b * len + i, s0[r * T + t], s1[r * T + t]);
+                        }
+                    }
+                }
+                for (std::size_t p = 0; p < R * T; ++p) {
+                    acc[p] = fma(lanes_f32::convert(s0[p] + s1[p]), lanes_f32(scale[p * nb + b]), acc[p]);
+                }
+            }
+        }
+        for (std::size_t p = 0; p < R * T; ++p) {
+            sums[p] = reduce_add(acc[p]);
+        }
+    } else {
+        sums.fill(0.0f);
+        for (std::size_t b = 0; b < nb; ++b) {
+            for (std::size_t r = 0; r < R; ++r) {
+                for (std::size_t t = 0; t < T; ++t) {
+                    std::int32_t s = 0;
+                    for (std::size_t i = 0; i < len; ++i) {
+                        s += std::int32_t{w[r][b * len + i]} * x[t][b * len + i];
+                    }
+                    const std::size_t p = r * T + t;
+                    sums[p] += static_cast<float>(s) * scale[p * nb + b];
+                }
+            }
+        }
+    }
+}
+
+}  // namespace detail
+
 /// Up to chunk_elements weights of one row, unpacked: blocks b0 .. b0+nb-1.
 template <quant::Scheme S>
 struct weight_chunk {
     using K = block_kernel<S>;
+    using act = typename K::act;
     static constexpr std::size_t max_blocks = chunk_elements / K::qk;
     /// Sub-block sums per block in Q8_K, the operand of the K formats' mins.
     static constexpr std::size_t sub_blocks = 16;
@@ -260,24 +349,55 @@ struct weight_chunk {
         }
     }
 
-    /// This chunk's contribution against one activation row: one block-scaled
-    /// reduction with scales d_w * d_a, less (for the K formats with mins) a
-    /// second over the mins and Q8_K's sub-block sums with scales dmin_w * d_a.
-    float dot(typename K::act a) const noexcept {
-        std::array<float, max_blocks> scale;
-        for (std::size_t b = 0; b < nb; ++b) {
-            scale[b] = s[b].d * K::act_scale(a, b0 + b);
-        }
-        float sum = mtl::simd::reduce_dot_block_scaled(w.data(), a.wide + b0 * K::qk, scale.data(), nb, K::qk);
-        if constexpr (has_min_term<K>) {
-            std::array<float, max_blocks> min_scale;
-            for (std::size_t b = 0; b < nb; ++b) {
-                min_scale[b] = s[b].dmin * K::act_scale(a, b0 + b);
+    /// The contributions of R chunks c[0..R) (the same blocks of R rows)
+    /// against T activation rows a[0..T): y[t * y_stride + r] += chunk r . a[t].
+    /// Each is one block-scaled sum with scales d_w * d_a, less (for the K
+    /// formats with mins) a second over the mins and Q8_K's sub-block sums
+    /// with scales dmin_w * d_a, the same for every R and T (G1).
+    ///   Pre: the R chunks hold the same blocks (b0, nb).
+    template <std::size_t R, std::size_t T>
+    static void dot_tile(const weight_chunk* c, const act* a, float* y, std::size_t y_stride) noexcept {
+        const std::size_t first = c[0].b0;
+        const std::size_t n = c[0].nb;
+        std::array<float, R * T * max_blocks> scale;
+        std::array<const std::int16_t*, R> wr;
+        std::array<const std::int16_t*, T> xt;
+        for (std::size_t r = 0; r < R; ++r) {
+            wr[r] = c[r].w.data();
+            for (std::size_t t = 0; t < T; ++t) {
+                for (std::size_t b = 0; b < n; ++b) {
+                    scale[(r * T + t) * n + b] = c[r].s[b].d * K::act_scale(a[t], first + b);
+                }
             }
-            sum -= mtl::simd::reduce_dot_block_scaled(
-                m16.data(), a.bsums + b0 * sub_blocks, min_scale.data(), nb, sub_blocks);
         }
-        return sum;
+        for (std::size_t t = 0; t < T; ++t) {
+            xt[t] = a[t].wide + first * K::qk;
+        }
+        std::array<float, R * T> sums;
+        detail::block_scaled_dots<R, T, K::qk>(wr, xt, scale.data(), n, sums);
+        if constexpr (has_min_term<K>) {
+            for (std::size_t r = 0; r < R; ++r) {
+                wr[r] = c[r].m16.data();
+                for (std::size_t t = 0; t < T; ++t) {
+                    for (std::size_t b = 0; b < n; ++b) {
+                        scale[(r * T + t) * n + b] = c[r].s[b].dmin * K::act_scale(a[t], first + b);
+                    }
+                }
+            }
+            for (std::size_t t = 0; t < T; ++t) {
+                xt[t] = a[t].bsums + first * sub_blocks;
+            }
+            std::array<float, R * T> mins;
+            detail::block_scaled_dots<R, T, sub_blocks>(wr, xt, scale.data(), n, mins);
+            for (std::size_t p = 0; p < R * T; ++p) {
+                sums[p] -= mins[p];
+            }
+        }
+        for (std::size_t r = 0; r < R; ++r) {
+            for (std::size_t t = 0; t < T; ++t) {
+                y[t * y_stride + r] += sums[r * T + t];
+            }
+        }
     }
 };
 
@@ -315,7 +435,7 @@ float row_dot(const std::byte* x, activations<typename S::vec_dot_block> a, std:
         weight_chunk<S> c;
         for (std::size_t b0 = 0; b0 < blocks; b0 += weight_chunk<S>::max_blocks) {
             c.load(x, b0, std::min(weight_chunk<S>::max_blocks, blocks - b0));
-            sumf += c.dot(a);
+            weight_chunk<S>::template dot_tile<1, 1>(&c, &a, &sumf, 0);
         }
     }
     return sumf;
