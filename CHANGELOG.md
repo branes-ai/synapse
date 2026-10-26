@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.4](https://github.com/branes-ai/synapse/compare/v0.13.3...v0.13.4) (2026-10-26)
+
+
+### Documentation
+
+* add the 2026-10-25 session log ([#59](https://github.com/branes-ai/synapse/issues/59)) ([e1c54a7](https://github.com/branes-ai/synapse/commit/e1c54a74f27d22acec0c146d679b37458ea08eb6))
+
 ## [0.13.3](https://github.com/branes-ai/synapse/compare/v0.13.2...v0.13.3) (2026-10-25)
 
 
