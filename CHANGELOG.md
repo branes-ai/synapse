@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.5](https://github.com/branes-ai/synapse/compare/v0.13.4...v0.13.5) (2026-10-27)
+
+
+### Documentation
+
+* link the mtl5 vectorized exp issue from the session log ([#61](https://github.com/branes-ai/synapse/issues/61)) ([fea1162](https://github.com/branes-ai/synapse/commit/fea1162198f420637409e2ec7c8321716467b1e2))
+
 ## [0.13.4](https://github.com/branes-ai/synapse/compare/v0.13.3...v0.13.4) (2026-10-26)
 
 
