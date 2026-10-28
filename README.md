@@ -5,11 +5,18 @@ Tensor compute engine, graph execution framework, and spatial processing system 
 `synapse` is the Branes.AI ML runtime layer: a modern C++20 tensor graph engine that loads GGML/GGUF models, plans their memory statically, and executes them on **MTL5** linear-algebra kernels. It is one of three sister platform repos, alongside `cortex` and `reflex`, that mission applications are built from.
 
 ```text
-+--------------+ +-------------------+ +-----------+ +------------+
-| racing-drone | | interceptor-drone | | isr-drone | | nano-drone | ...  Mission
-+--------------+ +-------------------+ +-----------+ +------------+
-        |                  |                 |              |
-        v                  v                 v              v
++--------------+ +-------------+
+| racing-drone | | scout-drone | ...                                     Mission
++--------------+ +-------------+
+        |               |
+        v               v
++---------------------------------------------------------------------+
+|                            Branes Anatomy                           |  Mission
+| data contracts, slots and composition, configs, replay log,         |  framework
+| harness, closed-loop simulator                                      |
++---------------------------------------------------------------------+
+           |                       |                       |
+           v                       v                       v
 +---------------------+ +---------------------+ +---------------------+
 |    Branes Cortex    | |   Branes Synapse    | |    Branes Reflex    |  Platform
 | perception (VIO,    | | tensor graph engine | | stabilization, MPC, |
@@ -30,14 +37,15 @@ Tensor compute engine, graph execution framework, and spatial processing system 
 
 ## Where synapse fits
 
-The Branes.AI stack has four tiers:
+The Branes.AI stack has five tiers:
 
-- **Mission**: one repo per vehicle and mission (`racing-drone`, `interceptor-drone`, `isr-drone`, `nano-drone`, ...). It owns the mission capability and composes platform components; algorithms do not live there.
+- **Mission**: one repo per vehicle and mission. `racing-drone` and `scout-drone` are the two that stand up the architecture; more follow (`interceptor-drone`, `isr-drone`, `nano-drone`, `counter-uas`). A mission repo owns its task: its world, the slots that see it, its stack and scorer, and its data. Algorithms do not live there.
+- **Mission framework**: [`anatomy`](https://github.com/branes-ai/anatomy), the body plan every mission composes its vehicle with: the data contracts, the slot concepts and their composition, configs, the replay log, the harness, and the closed-loop simulator. It holds no algorithms and no mission.
 - **Platform**: three sister repos, `cortex`, `synapse`, and `reflex`, that provide the functionality and services a mission is built from. None of them sits above the others.
 - **Math**: [MTL5](https://github.com/stillwater-sc/mtl5) provides high-performance linear algebra and [Universal](https://github.com/stillwater-sc/universal) provides computer arithmetic (posits, intervals, mixed precision, hardware-aligned types).
 - **Hardware**: the configurations the stack targets: CPU, CPU + GPU, CPU + KPU, and KPU. Today the stack runs on CPU; GPU and KPU support are planned, and the KPU is a stub until the silicon ships.
 
-Arrows point from a tier to the tier below it that it builds on. They show how the tiers relate, not the dependencies of individual repos: each repo's build declares the libraries it actually uses.
+Arrows point from a tier to the tier below it that it builds on. They show how the tiers relate, not the dependencies of individual repos: each repo's build declares the libraries it actually uses. A mission also uses platform components directly: it composes them into anatomy's slots.
 
 The platform repos are organized after the nervous system:
 
@@ -46,6 +54,7 @@ The platform repos are organized after the nervous system:
 | [`cortex`](https://github.com/branes-ai/cortex) | Cerebral cortex | Perception (VIO, SLAM, SfM), vision-language-action models, world building, path planning |
 | **`synapse`** (this repo) | The synapses: where signals are transmitted and computed | Tensor storage, graph construction, memory planning, and execution of ML models |
 | [`reflex`](https://github.com/branes-ai/reflex) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, IMU state propagation of the `cortex` estimate, MPC, fault recovery |
+| [`anatomy`](https://github.com/branes-ai/anatomy) | The body plan | The mission framework: data contracts, slots and composition, configs, replay log, harness, closed-loop simulator |
 
 `cortex` decides *what* to compute (a VLA policy, a depth network, a learned motion model). `synapse` turns that model into a static, allocation-free compute graph and runs it. `reflex` consumes the results inside its bounded control loops and must never wait on anything that can allocate or stall, which is why synapse's execution path is designed to be deterministic as well.
 
