@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.7](https://github.com/branes-ai/synapse/compare/v0.13.6...v0.13.7) (2026-10-28)
+
+
+### Documentation
+
+* the five-tier stack diagram, with anatomy and scout-drone ([#66](https://github.com/branes-ai/synapse/issues/66)) ([e463869](https://github.com/branes-ai/synapse/commit/e4638691e290aaa8dfab5c06a21387627d5d6e82))
+
 ## [0.13.6](https://github.com/branes-ai/synapse/compare/v0.13.5...v0.13.6) (2026-10-27)
 
 
