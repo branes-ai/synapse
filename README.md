@@ -47,7 +47,7 @@ The Branes.AI stack has five tiers:
 
 Arrows point from a tier to the tier below it that it builds on. They show how the tiers relate, not the dependencies of individual repos: each repo's build declares the libraries it actually uses. A mission also uses platform components directly: it composes them into anatomy's slots.
 
-The platform repos are organized after the nervous system:
+The platform repos are organized after the nervous system, and the mission framework, anatomy, is the body plan they are assembled into:
 
 | Repo | Biological analogue | Responsibility |
 |---|---|---|
