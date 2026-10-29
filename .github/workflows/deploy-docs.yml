@@ -1,0 +1,101 @@
+name: Deploy Documentation
+
+# Builds the Starlight docs site (generated from docs/ by
+# docs-site/scripts/sync-docs.mjs) and the Doxygen C++ API reference, and
+# publishes them to GitHub Pages at https://branes-ai.github.io/synapse/.
+#
+# One-time setup (repo admin, cannot be automated here): Settings → Pages →
+# Build and deployment → Source = "GitHub Actions". After that, every push
+# to main touching docs/, docs-site/, the public headers (API reference), or
+# this workflow redeploys.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'docs-site/**'
+      - 'sdk/include/**'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+# Least privilege globally; the deploy job opts into the Pages write scopes.
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install Doxygen
+        # Hardened against a stalled Ubuntu mirror (see branes-ai/cortex#443): per-request
+        # timeouts and retries, a hard cap per attempt, up to 3 attempts.
+        timeout-minutes: 10
+        run: |
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          for attempt in 1 2 3; do
+            sudo dpkg --configure -a || true
+            if timeout 180 sudo apt-get $APT_OPTS update && \
+               timeout 300 sudo apt-get $APT_OPTS install -y --no-install-recommends doxygen; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt failed; retrying in 15 s"
+            sleep 15
+          done
+          exit 1
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d  # v6.0.0
+
+      - name: Install dependencies
+        working-directory: docs-site
+        run: npm ci
+
+      - name: Generate C++ API reference (Doxygen)
+        working-directory: docs-site
+        run: npm run api
+
+      - name: Build site (Astro)
+        working-directory: docs-site
+        run: npm run build
+        env:
+          DEPLOY_TARGET: github-pages
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b  # v4.0.0
+        with:
+          path: docs-site/dist
+
+  deploy:
+    # Only the deploy job needs the Pages write scopes.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346  # v5.0.1

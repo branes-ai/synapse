@@ -48,6 +48,31 @@ jobs:
           echo "Checking $(echo "$files" | wc -l) files."
           echo "$files" | xargs clang-format --dry-run --Werror
 
+  # The docs site is generated from docs/ (docs/plan/docs-site); building it on
+  # every PR fails a broken relative link or anchor here instead of in the
+  # deploy after merge. No Doxygen: the API reference doesn't affect the check.
+  docs-site:
+    name: Docs site
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
+      - name: Install dependencies
+        working-directory: docs-site
+        run: npm ci
+      - name: Build the site (sync from docs/, then Astro)
+        working-directory: docs-site
+        run: npm run build
+        env:
+          DEPLOY_TARGET: github-pages
+
   # Dual-compiler validation on Linux: GCC and Clang, Debug (contract asserts
   # live) and Release (optimized, asserts compiled out), plus one Release build
   # with MTL5's Highway SIMD backend at AVX2 (see the gcc-release-hwy preset
