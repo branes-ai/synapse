@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-label="Synapse">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#9b7bff"/>
+      <stop offset="1" stop-color="#c9b8ff"/>
+    </linearGradient>
+  </defs>
+  <!-- A compute graph: inputs on the left, two layers of operations, one output. -->
+  <g fill="none" stroke="url(#g)" stroke-width="5" stroke-linecap="round" opacity="0.55">
+    <path d="M56 84 L148 112 M56 84 L148 208 M56 160 L148 112 M56 160 L148 208 M56 236 L148 112 M56 236 L148 208"/>
+    <path d="M148 112 L232 96 M148 112 L232 224 M148 208 L232 96 M148 208 L232 224"/>
+    <path d="M232 96 L280 160 M232 224 L280 160"/>
+  </g>
+  <!-- The path one signal takes through it. -->
+  <path d="M56 160 L148 112 L232 224 L280 160" fill="none" stroke="#9b7bff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="2 12"/>
+  <g fill="url(#g)">
+    <circle cx="56" cy="84" r="14"/>
+    <circle cx="56" cy="160" r="14"/>
+    <circle cx="56" cy="236" r="14"/>
+    <rect x="128" y="92" width="40" height="40" rx="8"/>
+    <rect x="128" y="188" width="40" height="40" rx="8"/>
+    <rect x="212" y="76" width="40" height="40" rx="8"/>
+    <rect x="212" y="204" width="40" height="40" rx="8"/>
+  </g>
+  <circle cx="280" cy="160" r="18" fill="#9b7bff"/>
+</svg>

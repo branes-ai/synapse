@@ -1,0 +1,15 @@
+# Astro / Node
+node_modules/
+dist/
+.astro/
+
+# Generated from ../docs by scripts/sync-docs.mjs (predev/prebuild hooks).
+# Edit the documents in docs/, never these.
+src/content/docs/
+src/generated/
+# The records' old pages, redirects to the architecture site.
+public/adr/
+public/plan/
+
+# Generated Doxygen C++ API reference (built in CI / by `npm run api`)
+public/api/

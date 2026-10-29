@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" role="img" aria-label="Synapse">
+  <rect width="320" height="320" rx="64" fill="#17132a"/>
+  <path d="M84 100 L160 160 L84 220 M160 160 L240 160" fill="none" stroke="#9b7bff" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="84" cy="100" r="24" fill="#9b7bff"/>
+  <circle cx="84" cy="220" r="24" fill="#9b7bff"/>
+  <circle cx="240" cy="160" r="30" fill="#ddd3ff"/>
+</svg>

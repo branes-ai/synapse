@@ -65,7 +65,7 @@ The core idea is a clean division of responsibilities:
 - **The GGML ecosystem is an ML environment.**
   - **ggml** is a tensor library with a DAG execution scheduler and a static memory planner.
   - **GGUF** is its model container format.
-  - **Its model ecosystem** (Llama, Phi, Mistral, Qwen, LLaVA, and custom policy networks, distributed as `.gguf` in full precision and quantized variants) is the reason to be compatible with it. [docs/ggml-ecosystem.md](docs/ggml-ecosystem.md) describes how it is put together, and [docs/llama-model.md](docs/llama-model.md) what a Llama-family model computes.
+  - **Its model ecosystem** (Llama, Phi, Mistral, Qwen, LLaVA, and custom policy networks, distributed as `.gguf` in full precision and quantized variants) is the reason to be compatible with it. [docs/arch/ggml-ecosystem.md](docs/arch/ggml-ecosystem.md) describes how it is put together, and [docs/arch/llama-model.md](docs/arch/llama-model.md) what a Llama-family model computes.
 - **MTL5 is a math engine.** It provides C++20 concepts, expression templates, layout traits, vectorization, and number systems beyond IEEE floats through [Universal](https://github.com/stillwater-sc/universal) (posits, intervals, mixed precision, hardware-aligned types).
 
 `synapse` reimplements the ML-environment half in modern C++20 and delegates the math to MTL5. The result reads GGML artifacts unchanged without carrying GGML's C code, `void*` dispatch, or `switch (ggml_type)` kernels.
@@ -197,9 +197,10 @@ Drop a `<name>.cpp` into `tests/sdk/` (unit tests) or `tests/examples/` (end-to-
 
 ### CI and releases
 
-- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): clang-format lint, then build and test on Linux (GCC and Clang, Debug and Release) and Windows (MSVC, Debug and Release).
+- **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): clang-format lint, a build of the docs site, then build and test on Linux (GCC and Clang, Debug and Release) and Windows (MSVC, Debug and Release).
 - **Conventional Commits** are enforced on PRs by [commitlint](commitlint.config.cjs).
 - **release-please** turns merged commits into a release PR, `CHANGELOG.md`, and a `vX.Y.Z` tag.
+- **Docs site** ([`.github/workflows/deploy-docs.yml`](.github/workflows/deploy-docs.yml)): the documentation in [`docs/`](docs/README.md) is published at <https://branes-ai.github.io/synapse/>, generated from `docs/` on every merge to main. CI builds it on every PR, so a broken relative link fails the PR.
 
 ## Repository layout
 
@@ -207,7 +208,8 @@ Drop a `<name>.cpp` into `tests/sdk/` (unit tests) or `tests/examples/` (end-to-
 synapse/
 ├── bench/        # micro-benchmarks (kernel throughput / latency)
 ├── cmake/        # dependency pins, test/warning helpers
-├── docs/         # design notes, assessments, session records
+├── docs/         # design notes, assessments, plans, session records: the source of the docs site
+├── docs-site/    # the Starlight site generated from docs/, published to GitHub Pages
 ├── scripts/      # developer and CI helper scripts, golden-fixture generators
 ├── sdk/          # the header-only library: sdk/include/branes/synapse/
 ├── tests/        # Catch2 regression tests, one executable per file; data/ holds golden fixtures

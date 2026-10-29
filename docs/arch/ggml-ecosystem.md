@@ -261,4 +261,4 @@ synapse also deliberately has no:
 - KV cache shifting;
 - training.
 
-Which synapse files port llama.cpp or ggml code, and under which license, is listed in [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+Which synapse files port llama.cpp or ggml code, and under which license, is listed in [THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md).

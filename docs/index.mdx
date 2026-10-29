@@ -1,0 +1,81 @@
+---
+title: Synapse
+description: The ML runtime of the Branes.AI platform, a header-only C++20 tensor graph engine that loads GGUF models, plans their memory statically, and runs them on MTL5 kernels.
+template: splash
+hero:
+  tagline: GGUF models from the GGML ecosystem, run as static, allocation-free compute graphs on MTL5 kernels, with the logits llama.cpp computes.
+  image:
+    file: ../../assets/hero.svg
+  actions:
+    - text: Get Started
+      link: ./getting-started/introduction/
+      icon: right-arrow
+    - text: View on GitHub
+      link: https://github.com/branes-ai/synapse
+      icon: external
+      variant: minimal
+---
+
+{/* The site's landing page (docs/plan/docs-site). It is MDX for the hero and
+    the cards; docs/README.md is the documentation map. */}
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## What Synapse is
+
+**Synapse** is the ML runtime of the Branes.AI platform: where signals are
+transmitted and computed. [Cortex](https://branes-ai.github.io/cortex/) decides
+what to compute (a vision-language-action policy, a depth network, a learned
+motion model), Synapse turns that model into a static compute graph and runs it,
+and [Reflex](https://branes-ai.github.io/reflex/) consumes the results inside
+control loops that must never wait on an allocation.
+
+Synapse reimplements the ML-environment half of the GGML ecosystem in modern
+C++20 and delegates the math to [MTL5](https://github.com/stillwater-sc/mtl5). It
+reads `.gguf` files unchanged, without carrying GGML's C code, `void*` dispatch,
+or `switch (ggml_type)` kernels ([the GGML ecosystem](arch/ggml-ecosystem.md)).
+
+<CardGrid>
+	<Card title="Any standard GGUF file" icon="document">
+		A zero-copy, no-throw GGUF v2/v3 parser over a memory mapping. Weights are
+		viewed in their storage format (F16, BF16, Q4_0, Q5_0, Q8_0, Q4_K, Q6_K) and
+		never copied.
+	</Card>
+	<Card title="No allocation during inference" icon="approve-check">
+		A liveness pass plans every activation into one arena before the first run.
+		Decode and prefill then allocate nothing and throw nothing.
+	</Card>
+	<Card title="Checked against llama.cpp" icon="magnifier">
+		Dequantizers bit-exact against `gguf-py`, kernels against ggml's, tokenizers
+		against `llama_tokenize`, and logits against llama.cpp on Llama, Qwen2 and
+		Mistral models.
+	</Card>
+	<Card title="Typed, not switched" icon="setting">
+		Element and quantization types are part of the graph's node types and pick
+		MTL5 kernels by concepts and traits, so a mismatch is a compile error.
+	</Card>
+</CardGrid>
+
+## The platform at a glance
+
+| Repo | Analogue | Responsibility |
+|---|---|---|
+| [`cortex`](https://github.com/branes-ai/cortex) | Cerebral cortex | Perception (VIO, SLAM, SfM), vision-language-action models, world building, path planning |
+| **`synapse`** | The synapses | Tensor storage, graph construction, memory planning, and execution of ML models |
+| [`reflex`](https://github.com/branes-ai/reflex) | Brainstem, spinal cord, autonomic system | Hard real-time control and safety: stabilization, state propagation, MPC, fault recovery |
+| [`anatomy`](https://github.com/branes-ai/anatomy) | The body plan | The mission framework: data contracts, slots, configs, replay log, harness, simulator |
+
+## Where to go next
+
+- **[Introduction](getting-started/introduction.md)**: the platform, the design, and the components.
+- **[Build & Test](getting-started/build-and-test.md)**: build, test, run a model, and use synapse from another project.
+- **[The GGML ecosystem](arch/ggml-ecosystem.md)**: GGUF, ggml, libllama and the conversion tools, and which synapse component corresponds to each.
+- **[What a Llama model computes](arch/llama-model.md)**: the computation step by step, why it is built that way, and what it costs.
+- **[Block-scaled dot performance](assessments/block-scaled-dot-performance.md)**: an investigation of the quantized kernels' speed.
+- **[Documentation map](README.md)**: every document, by folder.
+
+> Status: synapse loads and runs Llama-family models (`llama`, `qwen2`,
+> `mistral3`) and the SmolVLM image encoder from their GGUF files, with
+> tokenizers that match llama.cpp's exactly. Llama-3.2-1B Q4_K_M decodes at 28
+> to 30 tokens/s on a 20-thread x86 machine with the AVX2 build. GPU and KPU
+> backends are planned.
