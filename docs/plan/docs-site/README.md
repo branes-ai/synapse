@@ -4,7 +4,7 @@ issue: branes-ai/synapse#65
 ---
 # Plan: publish ./docs as a GitHub Pages site
 
-Issue: #65.
+Issue: #65. Implemented in #68.
 
 ## Goal
 
