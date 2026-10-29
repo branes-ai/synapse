@@ -7,7 +7,7 @@ This page walks through the computation synapse runs for a Llama-family model, o
 
 How the surrounding ecosystem (GGUF, ggml, libllama) is organized is in [ggml-ecosystem.md](ggml-ecosystem.md).
 
-The running example is **Llama-3.2-1B-Instruct**: 16 layers, width `d = 2048`, 32 query heads and 8 KV heads of dimension 64, a feed-forward width of 8192 and 128,256 tokens. Its costs are measured in [assessments/block-scaled-dot-performance.md §2](assessments/block-scaled-dot-performance.md#2-the-workload).
+The running example is **Llama-3.2-1B-Instruct**: 16 layers, width `d = 2048`, 32 query heads and 8 KV heads of dimension 64, a feed-forward width of 8192 and 128,256 tokens. Its costs are measured in [assessments/block-scaled-dot-performance.md §2](../assessments/block-scaled-dot-performance.md#2-the-workload).
 
 ## Contents
 
@@ -178,7 +178,7 @@ The opt-in real-model test (`tests/sdk/llama_model.cpp`) checks the same for eac
 
 ## 5. What it costs
 
-Per decode token, from [assessments/block-scaled-dot-performance.md §2.2](assessments/block-scaled-dot-performance.md#22-decode-one-token):
+Per decode token, from [assessments/block-scaled-dot-performance.md §2.2](../assessments/block-scaled-dot-performance.md#22-decode-one-token):
 
 | | Llama-3.2-1B Q4_K_M |
 |---|---|
