@@ -122,11 +122,18 @@ function githubAnchors(file) {
 }
 
 // The rendered text of a heading, as the slugger sees it: links become their
-// text, emphasis and code markers are dropped.
+// text, and emphasis and code markers are dropped. An underscore is emphasis
+// only at a word boundary; inside a word (Q8_0) or a code span it is text.
 function headingText(raw) {
   return raw
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/[*_`]/g, '')
+    .split(/(`+[^`]*`+)/)
+    .map((part, i) =>
+      i % 2 === 1
+        ? part.replace(/^`+|`+$/g, '')
+        : part.replace(/\*/g, '').replace(/(^|[^\p{L}\p{N}])_+|_+(?=[^\p{L}\p{N}]|$)/gu, '$1'),
+    )
+    .join('')
     .trim();
 }
 
