@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/branes-ai/synapse/compare/v0.13.7...v0.14.0) (2026-10-29)
+
+
+### Features
+
+* **docs-site:** publish docs/ as a github pages site ([#68](https://github.com/branes-ai/synapse/issues/68)) ([6a9a4a6](https://github.com/branes-ai/synapse/commit/6a9a4a6daaf8468ba6147643adcbe8cd2c6726fd))
+
 ## [0.13.7](https://github.com/branes-ai/synapse/compare/v0.13.6...v0.13.7) (2026-10-28)
 
 
