@@ -32,5 +32,5 @@ sdk/include/branes/synapse/
 | [`getting-started/`](introduction.md) | This introduction, building and testing, and this layout |
 | [`arch/`](../arch/ggml-ecosystem.md) | The GGML ecosystem, and what a Llama model computes |
 | [`assessments/`](../assessments/block-scaled-dot-performance.md) | Analyses and trade studies |
-| [`sessions/`](../sessions/2026-10-25.md) | Dated records of development sessions |
+| [`sessions/`](../sessions/) | Dated records of development sessions, on GitHub only |
 | `plan/` | One plan per issue, published on the [architecture site](https://branes-ai.github.io/architecture/synapse/) |

@@ -2,8 +2,10 @@
 //
 //   docs/**/*.md        → src/content/docs/**  (README.md → index.md), except
 //                         the records (docs/adr/, docs/plan/), which the
-//                         architecture site publishes (branes-ai/architecture)
-//   docs/index.mdx      → the home page (docs/plan/docs-site-landing)
+//                         architecture site publishes (branes-ai/architecture),
+//                         and the session logs (docs/sessions/), which are not
+//                         published
+//   docs/index.mdx      → the home page
 //   docs/README.md      → the documentation map, /overview/ (the home page
 //                         when there is no docs/index.mdx)
 //   sidebar             → src/generated/sidebar.json
@@ -35,6 +37,10 @@ const RECORDS = new Set(['adr', 'plan']);
 const ARCHITECTURE = 'https://branes-ai.github.io/architecture';
 const REPO = 'synapse';
 
+// Working records kept in the repo but not published: a link to one goes to
+// GitHub, like a link to any other repo file.
+const UNPUBLISHED = new Set(['sessions']);
+
 // Sidebar labels for top-level folders whose name is not a good label.
 const GROUP_LABELS = {
   arch: 'Architecture',
@@ -49,6 +55,7 @@ const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp']);
 
 const toPosix = (p) => p.split(path.sep).join('/');
 const isRecord = (docsRel) => RECORDS.has(docsRel.split('/')[0]);
+const isUnpublished = (docsRel) => UNPUBLISHED.has(docsRel.split('/')[0]);
 
 // A record's page on the architecture site: its path under docs/, each
 // segment slugified, a README being its folder's page. The rule is the site's
@@ -138,7 +145,7 @@ const allMd = walk(DOCS_DIR)
   .filter((f) => f.endsWith('.md'))
   .map((f) => toPosix(path.relative(DOCS_DIR, f)))
   .sort();
-const mdFiles = allMd.filter((rel) => !isRecord(rel));
+const mdFiles = allMd.filter((rel) => !isRecord(rel) && !isUnpublished(rel));
 
 const docs = new Map();
 for (const rel of mdFiles) {

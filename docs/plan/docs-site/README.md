@@ -14,7 +14,7 @@ A published site for synapse's documentation at <https://branes-ai.github.io/syn
 
 racing-drone's setup (branes-ai/racing-drone#49, #53), copied from its `main` with only the synapse-specific parts changed:
 
-- **`docs-site/scripts/sync-docs.mjs`** generates `docs-site/src/content/docs/` and the sidebar (both gitignored) from `docs/` before every `dev` and `build`. Changed: `GITHUB` and `REPO`.
+- **`docs-site/scripts/sync-docs.mjs`** generates `docs-site/src/content/docs/` and the sidebar (both gitignored) from `docs/` before every `dev` and `build`. Changed: `GITHUB` and `REPO`, and `docs/sessions/` is skipped (below).
   - Every `docs/**/*.md` becomes a page, a folder's `README.md` its index, and its first `# ` heading its title. Each page's "Edit page" link opens its source in `docs/`.
   - `docs/index.mdx` is the splash landing page, with its front matter kept; `docs/README.md` becomes the "Documentation map" at `/overview/`.
   - Relative links to documents become page links, and links to any other repo file become GitHub links. **A relative link or anchor that does not resolve fails the build**, naming the file and line, and so does a hero link that isn't a page.
@@ -32,11 +32,11 @@ racing-drone's setup (branes-ai/racing-drone#49, #53), copied from its `main` wi
 - **`getting-started/`**: `introduction.md`, `build-and-test.md` and `repository-layout.md`, from the top-level README.
 - **`README.md`**: the documentation map, one table row per folder with `getting-started/` first, and its "Start here" list kept.
 - **`arch/`**: the root-level `ggml-ecosystem.md` and `llama-model.md` move here, since the sidebar groups come from top-level folders. Their links, and the top-level README's links to them, are fixed.
-- **`sessions/`: published.** The issue left this open. The session records are linked from the map like any other folder, which keeps the generator identical to racing-drone's (it has no exclusion list besides the records) and keeps "one page per `docs/**/*.md`" true. cortex does not publish its sessions; if they turn out to be noise for the site's readers, excluding them is a one-line addition to `sync-docs.mjs`.
+- **`sessions/`: not published.** The issue left this open. The session logs are working records for the developers, not documentation for the library's users, and cortex does not publish its sessions either. `sync-docs.mjs` skips the folder (`UNPUBLISHED`, the one change to its logic from racing-drone's), and a link to a session log becomes a GitHub link, like a link to any other repo file.
 
 ## Acceptance
 
-1. `npm run build` in `docs-site/` builds one page per `docs/**/*.md` outside the records, plus the landing page.
+1. `npm run build` in `docs-site/` builds one page per `docs/**/*.md` outside the records and the session logs, plus the landing page.
 2. Every internal link in the built site resolves.
 3. A deliberately broken relative link in `docs/` fails the build, naming the file and line.
 4. The landing page matches cortex's structure, at desktop and phone widths, in both themes.

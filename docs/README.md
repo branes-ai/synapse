@@ -12,7 +12,7 @@ Start here:
 | [getting-started/](getting-started/introduction.md) | [Introduction](getting-started/introduction.md), [build & test](getting-started/build-and-test.md), [repository layout](getting-started/repository-layout.md) |
 | [arch/](arch/ggml-ecosystem.md) | Architecture and design: [the GGML ecosystem](arch/ggml-ecosystem.md) and where synapse fits, [what a Llama model computes](arch/llama-model.md); later the GGUF loader, graph IR, memory planner and kernel dispatch |
 | [assessments/](assessments/block-scaled-dot-performance.md) | Analyses and trade studies: [block-scaled dot performance](assessments/block-scaled-dot-performance.md), adopting MTL5's block-scaled integer dot in the quantized kernels |
-| [sessions/](sessions/2026-10-25.md) | Dated records of development sessions: [2026-10-25](sessions/2026-10-25.md), [2026-10-26](sessions/2026-10-26.md) |
+| [sessions/](sessions/) | Dated records of development sessions, kept in the repo and not published on the site |
 | plan/ | Per-issue plans, each with its issues and PRs: [docs site](plan/docs-site/README.md) |
 | adr/ | Architecture decision records |
 
