@@ -93,18 +93,32 @@ function pageOf(rel) {
 }
 
 // Splits a document into lines tagged with whether they sit in a code fence.
+// As in CommonMark, a fence closes only on a run of its own character at least
+// as long as the opening one, with nothing after it, so a four-backtick fence
+// can show a three-backtick example.
 function lines(text) {
   let fence = null;
   return text.split('\n').map((line) => {
-    const m = line.match(/^\s*(`{3,}|~{3,})/);
+    const m = line.match(/^\s*(`{3,}|~{3,})(.*)$/);
     if (m) {
-      const inFence = fence !== null;
-      if (fence === null) fence = m[1][0];
-      else if (m[1][0] === fence) fence = null;
-      return { line, code: true, wasFence: inFence };
+      if (fence === null) fence = m[1];
+      else if (m[1][0] === fence[0] && m[1].length >= fence.length && m[2].trim() === '') fence = null;
+      return { line, code: true };
     }
     return { line, code: fence !== null };
   });
+}
+
+// The anchors GitHub renders for a Markdown file: every heading's, the title's
+// included (the site drops the title, so parse() leaves it out).
+function githubAnchors(file) {
+  const slugger = new GithubSlugger();
+  const anchors = new Set();
+  for (const t of lines(fs.readFileSync(file, 'utf8'))) {
+    const m = !t.code && t.line.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (m) anchors.add(slugger.slug(headingText(m[2])));
+  }
+  return anchors;
 }
 
 // The rendered text of a heading, as the slugger sees it: links become their
@@ -218,6 +232,9 @@ function rewrite(target, rel, lineNo, copies) {
   if (inDocs && !isDir && IMAGE_EXT.has(path.extname(abs).toLowerCase())) {
     copies.add(docsRel);
     return target;
+  }
+  if (anchor !== null && !isDir && abs.endsWith('.md') && !githubAnchors(abs).has(anchor)) {
+    errors.push(`${where}: ${repoRel} has no heading for anchor #${anchor}`);
   }
   const kind = isDir ? 'tree' : 'blob';
   return `${GITHUB}/${kind}/${BRANCH}/${repoRel}` + (anchor !== null ? `#${anchor}` : '');
