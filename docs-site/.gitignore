@@ -3,7 +3,7 @@ node_modules/
 dist/
 .astro/
 
-# Generated from ../docs by scripts/sync-docs.mjs (predev/prebuild hooks).
+# Generated from ../docs by docs-kit (`npm run sync`, and before dev and build).
 # Edit the documents in docs/, never these.
 src/content/docs/
 src/generated/

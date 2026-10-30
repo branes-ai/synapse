@@ -59,19 +59,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38  # v6.5.0
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: docs-site/package-lock.json
-      - name: Install dependencies
-        working-directory: docs-site
-        run: npm ci
-      - name: Build the site (sync from docs/, then Astro)
-        working-directory: docs-site
-        run: npm run build
-        env:
-          DEPLOY_TARGET: github-pages
+      # Installs the pinned docs-kit (docs-site/package.json), builds the site as
+      # the deploy does, and checks every link and anchor in it.
+      - uses: branes-ai/docs-kit/actions/check@b0f58ec50bbd84ad5c6d9f22ddc8417e9f6b4194  # v0.1.0
 
   # Dual-compiler validation on Linux: GCC and Clang, Debug (contract asserts
   # live) and Release (optimized, asserts compiled out), plus one Release build
