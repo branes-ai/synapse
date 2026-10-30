@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/branes-ai/synapse/compare/v0.15.0...v0.15.1) (2026-10-30)
+
+
+### Continuous Integration
+
+* check the plans and ADRs on every PR ([#72](https://github.com/branes-ai/synapse/issues/72)) ([823b69b](https://github.com/branes-ai/synapse/commit/823b69bb60a266e47279dd638e3f40ddcbc1126c))
+
 ## [0.15.0](https://github.com/branes-ai/synapse/compare/v0.14.0...v0.15.0) (2026-10-30)
 
 
