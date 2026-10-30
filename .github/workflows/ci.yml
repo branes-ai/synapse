@@ -63,6 +63,22 @@ jobs:
       # the deploy does, and checks every link and anchor in it.
       - uses: branes-ai/docs-kit/actions/check@b0f58ec50bbd84ad5c6d9f22ddc8417e9f6b4194  # v0.1.0
 
+  # The plans and ADRs (docs/plan/, docs/adr/) are published on the
+  # architecture site (branes-ai/architecture). Its check runs here, strict, so
+  # a plan without a status, an ADR without a status block, or a broken link
+  # fails this PR rather than the site's hourly build.
+  records:
+    name: Architecture records
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: branes-ai/architecture/actions/check-records@820799bd055a46354930a6307f6887fc153a4bd0  # main after architecture#9
+        with:
+          strict: 'true'
+
   # Dual-compiler validation on Linux: GCC and Clang, Debug (contract asserts
   # live) and Release (optimized, asserts compiled out), plus one Release build
   # with MTL5's Highway SIMD backend at AVX2 (see the gcc-release-hwy preset
