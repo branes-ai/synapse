@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/branes-ai/synapse/compare/v0.14.0...v0.15.0) (2026-10-30)
+
+
+### Features
+
+* **docs-site:** build the site with docs-kit v0.1.0 ([#70](https://github.com/branes-ai/synapse/issues/70)) ([f82712d](https://github.com/branes-ai/synapse/commit/f82712d44a16d3ce3360d08d16e0b19672a8a857))
+
 ## [0.14.0](https://github.com/branes-ai/synapse/compare/v0.13.7...v0.14.0) (2026-10-29)
 
 
