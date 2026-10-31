@@ -14,6 +14,6 @@ Start here:
 | [assessments/](assessments/block-scaled-dot-performance.md) | Analyses and trade studies: [block-scaled dot performance](assessments/block-scaled-dot-performance.md), adopting MTL5's block-scaled integer dot in the quantized kernels |
 | [sessions/](sessions/) | Dated records of development sessions, kept in the repo and not published on the site |
 | plan/ | Per-issue plans, each with its issues and PRs: [docs site](plan/docs-site/README.md) |
-| adr/ | Architecture decision records |
+| [adr/](adr/README.md) | Architecture decision records: [third-party license compatibility](adr/0001-third-party-license-compatibility.md), [no GPL contact; port only from permissive sources](adr/0002-no-gpl-port-only-permissive.md) |
 
 The plans and the decisions are published on the [architecture site](https://branes-ai.github.io/architecture/synapse/), alongside every other repo's plans and decisions and their status, rather than here.
