@@ -14,9 +14,10 @@ on:
 
 # A new push to a PR supersedes its in-flight run. Each run on main has a
 # group of its own (its run id), so none is cancelled or replaced while
-# pending.
+# pending. The event name keeps a PR number and a run id from ever sharing a
+# group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Top-level least-privilege default.
