@@ -13,19 +13,21 @@ synapse is MIT-licensed (see the top-level [`LICENSE`](../../LICENSE)), like the
 
 | Dependency or source | License | Compatible with MIT synapse? | How it is used | Obligation |
 |---|---|---|---|---|
-| MTL5 | MIT | Yes | FetchContent: the linear algebra and the block-scaled kernels | Bundle its LICENSE in a distribution |
-| Universal | MIT | Yes | FetchContent, tests only: the tests instantiate the runtime with posits and cfloats | Bundle its LICENSE with source |
-| Highway | Apache-2.0 **or** BSD-3-Clause | Yes | FetchContent, opt-in (`SYNAPSE_WITH_HIGHWAY`): MTL5's SIMD backend | We take the BSD-3-Clause branch: bundle its notice, and don't use the authors' names for endorsement |
-| Catch2 v3 | BSL-1.0 | Yes | FetchContent, tests only | None for object code; bundle with source |
+| MTL5 | MIT | Yes | The linear algebra and the block-scaled kernels | Bundle its LICENSE in a distribution |
+| Universal | MIT | Yes | Tests only: the tests instantiate the runtime with posits and cfloats | Bundle its LICENSE with source |
+| Highway | Apache-2.0 **or** BSD-3-Clause | Yes | Opt-in (`SYNAPSE_WITH_HIGHWAY`): MTL5's SIMD backend | We take the BSD-3-Clause branch: bundle its notice, and don't use the authors' names for endorsement |
+| Catch2 v3 | BSL-1.0 | Yes | Tests only | None for object code; bundle with source |
 | llama.cpp and ggml | MIT | Yes | Ported code: the tokenizers, the quantized block formats, the dot-product arithmetic, RoPE and YaRN; one vocab file copied | Notice in [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md), and each ported header points there |
 | YaRN | MIT | Yes | Ported, through ggml's `rope_yarn` | Notice in `THIRD_PARTY_NOTICES.md` |
 | Unicode Character Database | Unicode License v3 | Yes | `tokenizer/unicode_tables.hpp` is generated from `UnicodeData.txt` | Notice in `THIRD_PARTY_NOTICES.md` |
+
+`cmake/deps.cmake` takes MTL5 and Universal from an installed package or a parent project's target when there is one, and Highway from MTL5's target, and fetches them with FetchContent otherwise. The license is the dependency's, however it arrives: a build that supplies its own copy must supply one under the same license.
 
 The test fixtures that `scripts/` writes (the `*_golden.gguf` files and the tiny models) are llama.cpp's output, not its code.
 
 **Model weights are not part of synapse.** The real-model tests (`SYNAPSE_LLAMA_MODEL`, `SYNAPSE_MMPROJ_MODEL`, …) are opt-in and read models the developer already has. The weights carry their own licenses, some of them not open source (the Llama models' community license), and synapse neither commits nor redistributes them.
 
-No GPL, LGPL, AGPL, MPL or SSPL dependency is accepted. [ADR-0002](0002-no-gpl-port-only-permissive.md) is the wider policy: no GPL code for any purpose, and what may be ported.
+No GPL, LGPL, AGPL, MPL or SSPL dependency is accepted. [ADR-0002](0002-no-gpl-port-only-permissive.md) is the wider policy: no GPL code for any purpose, and what may be ported. An exception would need an ADR of its own that supersedes this one.
 
 ## Decision
 

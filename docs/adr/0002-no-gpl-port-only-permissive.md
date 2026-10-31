@@ -1,4 +1,4 @@
-# ADR 0002 — No GPL contact; port only from permissive sources
+# ADR 0002 — No GPL code; port only from permissive sources
 
 **Status:** Accepted
 **Date:** 2026-10-31
@@ -13,13 +13,13 @@ synapse works differently from cortex in one respect. cortex implements its oper
 
 ## Decision
 
-**No GPL-licensed code anywhere in synapse, for any purpose.** Not as a dependency, not in a test target, not as a build-time tool in what synapse builds, and not as a reference oracle.
+**No GPL-licensed code anywhere in synapse, for any purpose.** Not as a dependency, not in a test target, not as a build-time tool in what synapse builds, and not as a reference oracle. The scope is ADR-0001's: what synapse ships, the code that builds it and the tests, and not the docs site's toolchain.
 
 - **Porting is allowed from permissive sources only:** MIT, BSD, Apache-2.0, or a license of the same kind. Each port is recorded in `THIRD_PARTY_NOTICES.md`, and the ported header says so (ADR-0001, decision 2).
-- **Check a source's license before opening its code.** Reading GPL source and then writing the same thing "from scratch" is neither a port nor clean-room. A GPL project may be consulted for its structure only (how it splits the problem), never for code.
+- **Check a source's license before opening its code.** Reading GPL source and then writing the same thing "from scratch" is neither a port nor clean-room. A GPL project's structure may be consulted, meaning its directory layout and how it splits the problem into modules, and nothing else: never its code, data, tables or constants.
 - **Otherwise, implement from papers, specifications and file formats.** The GGUF reader, for example, is written from the format, and checked against llama.cpp's `gguf-py`.
 - **Test oracles must be permissive too.** The golden outputs come from llama.cpp (MIT), written by `scripts/`. Never compare against a GPL program's output.
-- LGPL, MPL and SSPL candidates are flagged for explicit review and default to rejected.
+- **LGPL, MPL, AGPL and SSPL sources are rejected,** as dependencies and as sources to port from, as ADR-0001 rejects them. An exception would need an ADR of its own that supersedes this one.
 
 ## Consequences
 
