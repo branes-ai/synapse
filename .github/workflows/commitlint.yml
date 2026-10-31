@@ -29,3 +29,23 @@ jobs:
       - uses: wagoid/commitlint-github-action@b948419dd99f3fd78a6548d48f94e3df7f6bf3ed  # v6.2.1
         with:
           configFile: commitlint.config.cjs
+      # A squash merge takes the PR title, followed by " (#N)", as the subject
+      # of the commit on main, so the title is linted too, before the merge: as
+      # written, then as that subject for its length. Both use the repo's config
+      # with commitlint's default ignores ("Revert ...", "fixup! ...") off, so
+      # no title is skipped. An edit of the title reruns this job (the `edited`
+      # type).
+      - name: Lint the PR title
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          dir="$RUNNER_TEMP/commitlint"
+          npm install --prefix "$dir" --no-save --no-package-lock --no-audit --no-fund \
+            @commitlint/cli@19.8.1 @commitlint/config-conventional@19.8.1
+          cp commitlint.config.cjs "$dir/"
+          cd "$dir"
+          echo "module.exports = { ...require('./commitlint.config.cjs'), defaultIgnores: false };" > title.config.cjs
+          printf '%s\n' "$TITLE" | ./node_modules/.bin/commitlint --config title.config.cjs
+          printf '%s (#%s)\n' "$TITLE" "$NUMBER" | ./node_modules/.bin/commitlint --config title.config.cjs
