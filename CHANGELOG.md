@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.2](https://github.com/branes-ai/synapse/compare/v0.15.1...v0.15.2) (2026-10-31)
+
+
+### Continuous Integration
+
+* give each run on main a concurrency group of its own ([#74](https://github.com/branes-ai/synapse/issues/74)) ([a06cf68](https://github.com/branes-ai/synapse/commit/a06cf68a9e02305487d4bd5e1409e88c0463fc79))
+* lint the PR title as well as its commits ([#75](https://github.com/branes-ai/synapse/issues/75)) ([290b648](https://github.com/branes-ai/synapse/commit/290b648f4f6033cc34c4c095188293accc36109d))
+
 ## [0.15.1](https://github.com/branes-ai/synapse/compare/v0.15.0...v0.15.1) (2026-10-30)
 
 
