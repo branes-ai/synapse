@@ -14,6 +14,6 @@
     "preview": "docs-kit preview"
   },
   "dependencies": {
-    "@branes-ai/docs-kit": "github:branes-ai/docs-kit#v0.1.0"
+    "@branes-ai/docs-kit": "github:branes-ai/docs-kit#v0.4.1"
   }
 }
