@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.5](https://github.com/branes-ai/synapse/compare/v0.15.4...v0.15.5) (2026-11-01)
+
+
+### Documentation
+
+* name the LGPL packages in the docs toolchain exactly ([#81](https://github.com/branes-ai/synapse/issues/81)) ([be800eb](https://github.com/branes-ai/synapse/commit/be800eb0c73ff8444cafdbf89756c01252bf0c96))
+
 ## [0.15.4](https://github.com/branes-ai/synapse/compare/v0.15.3...v0.15.4) (2026-11-01)
 
 
