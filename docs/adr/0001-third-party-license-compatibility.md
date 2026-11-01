@@ -40,5 +40,5 @@ No GPL, LGPL, AGPL, MPL or SSPL dependency is accepted. [ADR-0002](0002-no-gpl-p
 
 - The ledger and this table together answer a partner's license review: what synapse links, and what it contains.
 - Porting from llama.cpp keeps synapse's numerics bit-comparable with it. The cost is the bookkeeping in decision 2.
-- **Scope.** This covers what synapse ships, the code that builds it and the tests. The docs site's toolchain is not part of it. Astro brings in sharp and libvips (LGPL-3.0) to process images, but they only build the documentation, in CI and on developers' machines.
+- **Scope.** This covers what synapse ships, the code that builds it and the tests. The docs site's toolchain is not part of it. Astro brings in sharp (Apache-2.0) to process images, and sharp brings prebuilt libvips binaries, the `@img/sharp-libvips-*` packages (LGPL-3.0-or-later). They only build the documentation, in CI and on developers' machines.
 - **Current state:** synapse's dependencies and ported sources are those in the table, and `THIRD_PARTY_NOTICES.md` lists every ported file ([#34](https://github.com/branes-ai/synapse/issues/34)). No release artifact bundles the dependencies' license files yet, because synapse has no packaged release.
