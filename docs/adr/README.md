@@ -6,5 +6,5 @@ The decisions are published, with their status, on the [architecture site](https
 
 | ADR | Decision | Status |
 |---|---|---|
-| [0001](0001-third-party-license-compatibility.md) | Third-party license compatibility (MIT; permissive dependencies and ports only) | Accepted |
+| [0001](0001-third-party-license-compatibility.md) | Third-party license compatibility (MIT; permissive dependencies and ports only) | Accepted (amended) |
 | [0002](0002-no-gpl-port-only-permissive.md) | No GPL code for any purpose; port only from permissive sources | Accepted |
