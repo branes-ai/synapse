@@ -1,6 +1,6 @@
 # ADR 0001 — Third-party license compatibility
 
-**Status:** Accepted
+**Status:** Accepted (amended 2026-11-01: third-party data and published facts)
 **Date:** 2026-10-31
 **Source:** the stack's license posture, set in cortex's [ADR 0001](https://github.com/branes-ai/cortex/blob/main/docs/adr/0001-third-party-license-compatibility.md); synapse's notices, [#34](https://github.com/branes-ai/synapse/issues/34)
 **Related:** [ADR-0002](0002-no-gpl-port-only-permissive.md)
@@ -27,6 +27,8 @@ The test fixtures that `scripts/` writes (the `*_golden.gguf` files and the tiny
 
 **Model weights are not part of synapse.** The real-model tests (`SYNAPSE_LLAMA_MODEL`, `SYNAPSE_MMPROJ_MODEL`, …) are opt-in and read models the developer already has. The weights carry their own licenses, some of them not open source (the Llama models' community license), and synapse neither commits nor redistributes them.
 
+**The same rule covers any third-party data.** A dataset, vocabulary or set of weights may be committed or fetched only under a license the ledger records; data without one, or under a non-commercial or share-alike license (CC BY-NC, CC BY-SA, …), stays outside the repo. A dataset's published facts are not its data: calibration parameters, sensor specifications and results printed in a paper may be written into the repo's own files, with a citation to their source. A file copied from a dataset is the dataset's, and follows the rule above.
+
 No GPL, LGPL, AGPL, MPL or SSPL dependency is accepted. [ADR-0002](0002-no-gpl-port-only-permissive.md) is the wider policy: no GPL code for any purpose, and what may be ported. An exception would need an ADR of its own that supersedes this one.
 
 ## Decision
@@ -34,11 +36,11 @@ No GPL, LGPL, AGPL, MPL or SSPL dependency is accepted. [ADR-0002](0002-no-gpl-p
 1. **synapse stays MIT-licensed.** Every dependency and every ported source must be compatible with MIT.
 2. **[`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md) is the ledger** of everything in synapse that is someone else's work: each ported file, its source, and the license text. A PR that ports code, copies a file or generates one from a third-party source must add it there. Each ported header must say so and point to the ledger.
 3. **A PR that adds a dependency must add it to this table**, with its license and its obligation. A dependency that is dual-licensed is used under its permissive branch.
-4. **Model weights stay outside the repo.** Only fixtures that synapse's scripts generate, or files whose license is in the ledger, are committed.
+4. **Model weights stay outside the repo,** and other third-party data is committed or fetched only under a license recorded in the ledger. Only fixtures that synapse's scripts generate, or files whose license is in the ledger, are committed. Published facts (a model's hyperparameters, a paper's results) may be quoted, with a citation.
 
 ## Consequences
 
 - The ledger and this table together answer a partner's license review: what synapse links, and what it contains.
 - Porting from llama.cpp keeps synapse's numerics bit-comparable with it. The cost is the bookkeeping in decision 2.
 - **Scope.** This covers what synapse ships, the code that builds it and the tests. The docs site's toolchain is not part of it. Astro brings in sharp (Apache-2.0) to process images, and sharp brings prebuilt libvips binaries, the `@img/sharp-libvips-*` packages (LGPL-3.0-or-later). They only build the documentation, in CI and on developers' machines.
-- **Current state:** synapse's dependencies and ported sources are those in the table, and `THIRD_PARTY_NOTICES.md` lists every ported file ([#34](https://github.com/branes-ai/synapse/issues/34)). No release artifact bundles the dependencies' license files yet, because synapse has no packaged release.
+- **Current state:** synapse's dependencies and ported sources are those in the table, and `THIRD_PARTY_NOTICES.md` lists every ported file ([#34](https://github.com/branes-ai/synapse/issues/34)). The one third-party data file is `tests/data/spm_vocab.gguf`, Llama 2's SentencePiece vocabulary, copied from llama.cpp, which distributes it under MIT; the vocabulary itself comes from Meta's tokenizer. No release artifact bundles the dependencies' license files yet, because synapse has no packaged release.
