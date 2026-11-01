@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.7](https://github.com/branes-ai/synapse/compare/v0.15.6...v0.15.7) (2026-11-01)
+
+
+### Documentation
+
+* **adr:** extend the weights rule to all third-party data ([#86](https://github.com/branes-ai/synapse/issues/86)) ([39edef1](https://github.com/branes-ai/synapse/commit/39edef14976b7383de442095d93f31ed12c956fc))
+
 ## [0.15.6](https://github.com/branes-ai/synapse/compare/v0.15.5...v0.15.6) (2026-11-01)
 
 
