@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.4](https://github.com/branes-ai/synapse/compare/v0.15.3...v0.15.4) (2026-11-01)
+
+
+### Documentation
+
+* record the license policy as ADRs 0001 and 0002 ([#79](https://github.com/branes-ai/synapse/issues/79)) ([10f9706](https://github.com/branes-ai/synapse/commit/10f9706b2d6e7d4d8b51ee6aed7b6bcd41f49145))
+
 ## [0.15.3](https://github.com/branes-ai/synapse/compare/v0.15.2...v0.15.3) (2026-10-31)
 
 
