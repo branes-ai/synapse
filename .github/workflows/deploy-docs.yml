@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   pages:
-    uses: branes-ai/docs-kit/.github/workflows/pages.yml@5e04e94fb3640d936ef6492549d3fce9c6ec1945  # v0.4.1
+    uses: branes-ai/docs-kit/.github/workflows/pages.yml@8f55c75f0151e934eb2b0abe384cfcc0e5f75df1  # v0.6.0
     # The deploy job inside needs the Pages write scopes.
     permissions:
       contents: read
