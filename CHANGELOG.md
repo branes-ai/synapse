@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.10](https://github.com/branes-ai/synapse/compare/v0.15.9...v0.15.10) (2026-11-03)
+
+
+### Bug Fixes
+
+* **build:** fetch a moved pin in an existing build tree ([#91](https://github.com/branes-ai/synapse/issues/91)) ([715974f](https://github.com/branes-ai/synapse/commit/715974f8e24fd1a6f63435553801d635b1c8be32))
+
 ## [0.15.9](https://github.com/branes-ai/synapse/compare/v0.15.8...v0.15.9) (2026-11-01)
 
 
