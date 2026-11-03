@@ -12,8 +12,13 @@
 
 include(FetchContent)
 
-# Don't re-run `git fetch` on every build.
-set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "" FORCE)
+# Every pin is a tag or a commit, so a configure fetches only when a pin moves:
+# the update step finds the commit checked out and stops. With updates
+# disconnected, a moved pin fails to configure in an existing build tree whose
+# clone predates the new commit. Earlier versions of this file cached
+# FETCHCONTENT_UPDATES_DISCONNECTED ON with FORCE, so this normal variable,
+# which wins over the cache entry, keeps it OFF.
+set(FETCHCONTENT_UPDATES_DISCONNECTED OFF)
 
 # ── catchorg/Catch2 v3 — testing framework ──────────────────────────
 # SYSTEM so its headers don't trip the warnings-as-errors test build.
