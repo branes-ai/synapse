@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.11](https://github.com/branes-ai/synapse/compare/v0.15.10...v0.15.11) (2026-11-05)
+
+
+### Continuous Integration
+
+* pin docs-kit and architecture by their rewritten shas ([#93](https://github.com/branes-ai/synapse/issues/93)) ([d6c01bd](https://github.com/branes-ai/synapse/commit/d6c01bd3a0fcc1b96615a6d30369feccc507498a))
+
 ## [0.15.10](https://github.com/branes-ai/synapse/compare/v0.15.9...v0.15.10) (2026-11-03)
 
 
