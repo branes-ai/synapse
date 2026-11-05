@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.12](https://github.com/branes-ai/synapse/compare/v0.15.11...v0.15.12) (2026-11-05)
+
+
+### Continuous Integration
+
+* add Branes.AI CLA check ([#95](https://github.com/branes-ai/synapse/issues/95)) ([2f96a2b](https://github.com/branes-ai/synapse/commit/2f96a2b36503bbf54cd05deb197d9c17d7cce5f9))
+
 ## [0.15.11](https://github.com/branes-ai/synapse/compare/v0.15.10...v0.15.11) (2026-11-05)
 
 
