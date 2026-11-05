@@ -63,7 +63,7 @@ jobs:
           persist-credentials: false
       # Installs the pinned docs-kit (docs-site/package.json), builds the site as
       # the deploy does, and checks every link and anchor in it.
-      - uses: branes-ai/docs-kit/actions/check@8f55c75f0151e934eb2b0abe384cfcc0e5f75df1  # v0.6.0
+      - uses: branes-ai/docs-kit/actions/check@717776d1db4888d57dab00e718ead6b9e98d6b2b  # v0.6.0
 
   # The plans and ADRs (docs/plan/, docs/adr/) are published on the
   # architecture site (branes-ai/architecture). Its check runs here, strict, so
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: branes-ai/architecture/actions/check-records@820799bd055a46354930a6307f6887fc153a4bd0  # main after architecture#9
+      - uses: branes-ai/architecture/actions/check-records@0aa9054cfa86426dcca4ad7ba5f603cb70fbf24c  # main after architecture#9
         with:
           strict: 'true'
 
